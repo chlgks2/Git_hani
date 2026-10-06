@@ -1,7 +1,7 @@
 // 실제 저장소의 저장 기록 그래프 (git log)
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Cloud, GitBranch, Tag } from "lucide-react";
-import { gitCommitStats, timeAgo, type CommitInfo, type FileStat, type UnpushedCommit } from "../git";
+import { ArrowDown, ArrowUp, Check, Cloud, GitBranch, LifeBuoy, Tag } from "lucide-react";
+import { gitCommitStats, isBackupRef, timeAgo, type CommitInfo, type FileStat, type UnpushedCommit } from "../git";
 import { buildInsights } from "../graphInsights";
 import { layoutGraph } from "../graphLayout";
 import CommitCard, { type CardData } from "./CommitCard";
@@ -19,7 +19,7 @@ const WIP = "__wip__";
 
 interface Label {
   text: string;
-  kind: "head" | "local" | "remote" | "tag" | "detached";
+  kind: "head" | "local" | "remote" | "tag" | "detached" | "backup";
   synced?: boolean; // 같은 이름의 온라인 갈래도 여기 있음
 }
 
@@ -30,6 +30,7 @@ function parseRefs(refs: string[]): Label[] {
   for (const r of refs) {
     if (r === "HEAD") out.push({ text: "HEAD", kind: "detached" });
     else if (r.startsWith("HEAD -> refs/heads/")) out.push({ text: r.slice(19), kind: "head" });
+    else if (r.startsWith("refs/heads/") && isBackupRef(r.slice(11))) out.push({ text: "되돌리기 전 백업", kind: "backup" });
     else if (r.startsWith("refs/heads/")) out.push({ text: r.slice(11), kind: "local" });
     else if (r.startsWith("tag: refs/tags/")) out.push({ text: r.slice(15), kind: "tag" });
     else if (r.startsWith("refs/remotes/") && !r.endsWith("/HEAD")) remotes.push(r.slice(13));
@@ -49,6 +50,8 @@ export default function RealGraph({
   fileNames,
   unpushed,
   incoming,
+  selected,
+  onSelect,
 }: {
   root: string;
   commits: CommitInfo[];
@@ -57,9 +60,11 @@ export default function RealGraph({
   unpushed: UnpushedCommit[];
   /** 온라인에만 있고 아직 받지 않은 저장 지점들 */
   incoming: UnpushedCommit[];
+  /** 고른 저장 지점 (되돌리기 대상) */
+  selected: string | null;
+  onSelect: (hash: string | null) => void;
 }) {
   const changeCount = fileNames.length;
-  const [selected, setSelected] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [stats, setStats] = useState<Map<string, FileStat[]>>(new Map());
   const notPushed = useMemo(() => new Set(unpushed.map((c) => c.hash)), [unpushed]);
@@ -92,7 +97,7 @@ export default function RealGraph({
     for (const c of commits) {
       const labels = parseRefs(c.refs);
       // 내 갈래 이름을 먼저, 없으면 온라인 갈래 이름(origin/ 뗀 것)
-      const local = labels.filter((l) => l.kind === "head" || l.kind === "local").map((l) => l.text);
+      const local = labels.filter((l) => l.kind === "head" || l.kind === "local" || l.kind === "backup").map((l) => l.text);
       const remote = labels.filter((l) => l.kind === "remote").map((l) => l.text.split("/").slice(1).join("/"));
       if (local.length || remote.length) names.set(c.hash, [...local, ...remote]);
       const head = labels.find((l) => l.kind === "head");
@@ -115,7 +120,7 @@ export default function RealGraph({
       .catch(() => setStats((m) => new Map(m).set(h, [])));
   }, [hover, root, stats]);
 
-  const graphW = Math.max(60, laneX(layout.laneCount - 1) + 22);
+  const graphW = Math.max(84, laneX(layout.laneCount - 1) + 22); // 머리글 "그래프 graph" 가 한 줄에 들어가는 최소 폭
   const height = rows.length * ROW;
 
   if (!rows.length) {
@@ -150,7 +155,7 @@ export default function RealGraph({
             return (
               <div
                 key={c.hash}
-                onClick={() => setSelected(isSel ? null : c.hash)}
+                onClick={() => !c.wip && onSelect(isSel ? null : c.hash)}
                 className={`absolute inset-x-0 flex cursor-default items-center hover:bg-hover/50 ${isSel ? "bg-teal/10" : ""}`}
                 style={{ top: r * ROW, height: ROW }}
               >
@@ -234,6 +239,7 @@ export default function RealGraph({
                     style={{ pointerEvents: "all", cursor: "pointer" }}
                     onMouseEnter={() => setHover(c.hash)}
                     onMouseLeave={() => setHover((h) => (h === c.hash ? null : h))}
+                    onClick={() => !c.wip && onSelect(selected === c.hash ? null : c.hash)}
                   />
                 </g>
               );
@@ -270,6 +276,7 @@ export default function RealGraph({
           color: color(lane),
           events: ins?.events ?? [],
           position: ins?.position,
+          hint: selected === c.hash ? undefined : "눌러서 고르면 이 상태로 되돌릴 수 있어요",
           unpushed: notPushed.has(c.hash),
           incoming: notPulled.has(c.hash),
           stats: stats.get(c.hash) ?? "loading",
@@ -308,6 +315,12 @@ function RefChip({ l, lane }: { l: Label; lane: number }) {
     return (
       <span className={`${base} border border-line text-muted`} title={`온라인 갈래 ${l.text}`}>
         <Cloud size={11} /> {l.text}
+      </span>
+    );
+  if (l.kind === "backup")
+    return (
+      <span className={`${base} border border-amber/50 bg-amber/10 text-amber`} title="되돌리기 직전에 보관해 둔 상태">
+        <LifeBuoy size={11} /> {l.text}
       </span>
     );
   if (l.kind === "tag")

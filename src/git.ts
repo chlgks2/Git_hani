@@ -122,6 +122,38 @@ export const gitResolveWhole = (path: string, file: string, side: "ours" | "thei
 export const gitFinishMerge = (path: string) => invoke<{ hash: string; short: string }>("git_finish_merge", { path });
 export const gitAbortMerge = (path: string) => invoke<void>("git_abort_merge", { path });
 
+/* ---------- 되돌리기 ---------- */
+
+export interface RestoreChange {
+  path: string;
+  /** restore 되살아남 / delete 지워짐 / modify 바뀜 / clean 새로 생긴 파일 정리(백업에 보관) */
+  kind: "restore" | "delete" | "modify" | "clean";
+}
+
+export interface RestorePreview {
+  target: CommitInfo;
+  changes: RestoreChange[];
+  /** 저장 안 한 변경이 있어서 되돌리기 전에 백업하는지 */
+  dirty: boolean;
+  /** 마지막 저장 지점으로 되돌리기 = 저장 안 한 변경 취소 */
+  isHead: boolean;
+}
+
+export interface RestoreResult {
+  backup: string | null;
+  commit: { hash: string; short: string } | null;
+  changed: number;
+  /** 백업을 되살려 "저장 안 한 변경"으로 돌려놓았는지 */
+  uncommitted: boolean;
+}
+
+export const gitRestorePreview = (path: string, target: string) =>
+  invoke<RestorePreview>("git_restore_preview", { path, target });
+export const gitRestoreTo = (path: string, target: string) => invoke<RestoreResult>("git_restore_to", { path, target });
+
+/** 되돌리기 전 백업 갈래인지 (backup/before-restore-…) */
+export const isBackupRef = (name: string) => name.startsWith("backup/before-restore-");
+
 /** 저장 지점 하나에서 바뀐 파일과 줄 수 (바이너리 파일은 null) */
 export interface FileStat {
   path: string;

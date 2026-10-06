@@ -1,6 +1,6 @@
 // 실제 저장소 모드: 사용자가 고른 폴더의 상태·저장 기록을 보여주고, 고른 파일을 커밋한다.
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, LifeBuoy, RefreshCw, RotateCcw, Undo2, X } from "lucide-react";
 import {
   gitCommit,
   gitAbortMerge,
@@ -10,10 +10,13 @@ import {
   gitLog,
   gitPull,
   gitPush,
+  gitRestorePreview,
+  gitRestoreTo,
   gitStartMerge,
   gitStatus,
   gitUnpushed,
   looksSecret,
+  isBackupRef,
   isDesktop,
   pickFolder,
   startupPath,
@@ -22,6 +25,7 @@ import {
   STATUS_TONE,
   type CommitInfo,
   type CommitWithFiles,
+  type RestorePreview,
   type FileChange,
   type RepoStatus,
   type UnpushedCommit,
@@ -56,6 +60,9 @@ export function useRealRepo() {
   const [conflict, setConflict] = useState<string[] | null>(null); // 마지막 받아오기에서 충돌 난 파일
   const [resolving, setResolving] = useState(false); // 충돌 해결 화면을 열었는지
   const [mergeFiles, setMergeFiles] = useState<string[]>([]); // 이번 합치기에서 충돌 난 파일 전체
+  const [selected, setSelected] = useState<string | null>(null); // 그래프에서 고른 저장 지점
+  const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null); // 되돌리기 확인 창
+  const [restoring, setRestoring] = useState(false);
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -199,6 +206,8 @@ export function useRealRepo() {
     setConflict(null);
     setResolving(false);
     setMergeFiles([]);
+    setSelected(null);
+    setRestoreAsk(null);
     setLog([]);
   };
 
@@ -397,6 +406,59 @@ export function useRealRepo() {
     }
   };
 
+  /* ---------- 되돌리기 ---------- */
+
+  /** 지금 마지막 저장 지점 */
+  const headHash = commits.find((c) => c.refs.some((ref) => ref === "HEAD" || ref.startsWith("HEAD -> ")))?.hash ?? null;
+
+  /** 되돌리기 확인 창 열기: 무엇이 바뀌는지 먼저 계산해서 보여준다 */
+  const askRestore = async (target: string) => {
+    if (!repo) return;
+    try {
+      setRestoreAsk(await gitRestorePreview(repo.root, target));
+    } catch (e) {
+      addBlock({ title: "되돌리기", git: "git restore", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  /** 툴바의 되돌리기 버튼: 고른 저장 지점이 있으면 그쪽으로, 없으면 저장 안 한 변경 취소 */
+  const restoreShortcut = () => {
+    if (selected) return askRestore(selected);
+    if (repo?.files.length && headHash) return askRestore(headHash);
+    addBlock({
+      title: "되돌리기",
+      lines: [{ tone: "plain", text: "그래프에서 돌아가고 싶은 저장 지점을 눌러 고른 뒤 다시 눌러 주세요." }],
+    });
+  };
+
+  const doRestore = async () => {
+    if (!repo || !restoreAsk || restoring) return;
+    const t = restoreAsk.target;
+    setRestoring(true);
+    try {
+      const res = await gitRestoreTo(repo.root, t.hash);
+      const lines: Block["lines"] = [];
+      if (res.backup) lines.push({ tone: "ok", text: "저장 안 한 변경과 새 파일은 ‘되돌리기 전 백업’으로 보관했어요" });
+      if (res.uncommitted) lines.push({ tone: "ok", text: "백업을 되살렸어요. 저장 안 한 변경으로 돌아왔으니 확인한 뒤 커밋하세요" });
+      else if (restoreAsk.isHead) lines.push({ tone: "ok", text: "저장 안 한 변경을 취소하고 마지막 저장 상태로 돌아왔어요" });
+      else lines.push({ tone: "ok", text: `“${t.subject}” (${t.short}) 상태로 돌아왔어요` });
+      if (res.commit) lines.push({ tone: "dim", text: `되돌린 상태를 새 저장 지점으로 기록했어요 · ${res.commit.short} (기록은 지워지지 않아요)` });
+      if (res.backup) lines.push({ tone: "dim", text: "그래프의 ‘되돌리기 전 백업’을 고르면 언제든 다시 되살릴 수 있어요" });
+      addBlock({
+        title: res.uncommitted ? "백업 되살리기" : restoreAsk.isHead ? "변경 모두 취소" : "되돌리기",
+        git: `git restore --source=${t.short} .${res.commit ? " && git commit" : ""}`,
+        lines,
+      });
+      setRestoreAsk(null);
+      setSelected(null);
+      await reload();
+    } catch (e) {
+      addBlock({ title: "되돌리기", git: "git restore", lines: [{ tone: "err", text: String(e) }] });
+    } finally {
+      setRestoring(false);
+    }
+  };
+
   // 실행할 때 폴더를 함께 줬으면 그 폴더를 바로 연다
   useEffect(() => {
     if (!isDesktop()) return;
@@ -428,6 +490,8 @@ export function useRealRepo() {
     cancelSecret: () => setSecretAsk(null),
     dismissConflict: () => setConflict(null),
     resolving, mergeFiles, reload, openResolver, closeResolver: () => setResolving(false), noteResolved, finishMerge, abortMerge,
+    selected, setSelected, headHash, restoreAsk, restoring, askRestore, restoreShortcut, doRestore,
+    cancelRestore: () => setRestoreAsk(null),
   };
 }
 
@@ -504,6 +568,8 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
         fileNames={repo.files.map((f) => f.path)}
         unpushed={r.unpushed}
         incoming={r.incoming}
+        selected={r.selected}
+        onSelect={r.setSelected}
       />
       {splitter}
       <section className="flex shrink-0 flex-col bg-panel" style={{ height: termH }}>
@@ -575,6 +641,8 @@ export function RealInspector({ r }: { r: RealRepo }) {
               </div>
             </div>
           )}
+          {r.selected && <SelectedCommit r={r} />}
+
           <Sync repo={repo} />
 
           {repo.files.length ? (
@@ -589,6 +657,18 @@ export function RealInspector({ r }: { r: RealRepo }) {
             </div>
           )}
         </div>
+
+        {repo.files.length > 0 && !repo.merging && r.headHash && (
+          <div className="-mt-2 px-4 pb-3">
+            <button
+              onClick={() => r.askRestore(r.headHash!)}
+              className="flex items-center gap-1.5 text-[11px] text-dim hover:text-red"
+              title="AI 가 망쳐 놨을 때처럼, 마지막 저장 이후의 변경을 모두 버려요 (백업은 남겨요)"
+            >
+              <Undo2 size={11} /> 변경 모두 취소 (마지막 저장 상태로)
+            </button>
+          </div>
+        )}
 
         {repo.files.length > 0 && !repo.merging && (
           <div className="border-t border-line-soft">
@@ -638,6 +718,7 @@ export function RealInspector({ r }: { r: RealRepo }) {
       </aside>
 
       {r.secretAsk && <SecretModal r={r} ask={r.secretAsk} />}
+      {r.restoreAsk && <RestoreModal r={r} pv={r.restoreAsk} />}
     </>
   );
 }
@@ -716,6 +797,132 @@ function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
             </button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 되돌리기 ---------- */
+
+/** 그래프에서 고른 저장 지점 */
+function SelectedCommit({ r }: { r: RealRepo }) {
+  const c = r.commits.find((x) => x.hash === r.selected);
+  if (!c) return null;
+  const isHead = c.hash === r.headHash;
+  const backup = c.refs.some((ref) => isBackupRef(ref.replace(/^refs\/heads\//, "")));
+  const dirty = r.repo!.files.length > 0;
+  const canRestore = !r.repo!.merging && (!isHead || dirty);
+  return (
+    <div className="rise border border-teal/40 bg-teal/5 p-3">
+      <div className="flex items-center gap-2 font-mono text-[10px] text-dim">
+        <span>{c.short}</span>
+        <span className="font-sans">{c.author}</span>
+        <span className="font-sans">{timeAgo(c.time)}</span>
+        <button onClick={() => r.setSelected(null)} className="ml-auto text-dim hover:text-fg" title="선택 해제">
+          <X size={12} />
+        </button>
+      </div>
+      <div className="mt-1 text-[13px] font-medium text-fg">{backup ? "되돌리기 전 백업" : c.subject}</div>
+      {backup && <div className="mt-0.5 text-[11px] text-amber">되돌리기 직전에 보관해 둔 상태예요. 이 상태로 되살릴 수 있어요.</div>}
+      {isHead && <div className="mt-0.5 text-[11px] text-muted">지금 마지막 저장 지점이에요.</div>}
+      <button
+        onClick={() => r.askRestore(c.hash)}
+        disabled={!canRestore}
+        className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-[3px] border border-teal/60 py-1.5 text-[12px] font-medium text-teal hover:bg-teal/10 disabled:cursor-not-allowed disabled:opacity-30"
+        title={isHead && !dirty ? "지금 상태와 같아서 되돌릴 게 없어요" : undefined}
+      >
+        <RotateCcw size={12} /> {backup ? "백업 되살리기" : isHead ? "저장 안 한 변경 취소" : "이 상태로 되돌리기"}
+      </button>
+    </div>
+  );
+}
+
+const KIND_LABEL: Record<string, { text: string; tone: string }> = {
+  modify: { text: "내용 바뀜", tone: "text-amber" },
+  restore: { text: "되살아남", tone: "text-green" },
+  delete: { text: "지워짐", tone: "text-red" },
+  clean: { text: "새 파일 정리", tone: "text-dim" },
+};
+
+function RestoreModal({ r, pv }: { r: RealRepo; pv: RestorePreview }) {
+  const t = pv.target;
+  const backup = t.refs.some((ref) => isBackupRef(ref.replace(/^refs\/heads\//, "")));
+  const title = pv.isHead
+    ? "저장 안 한 변경을 모두 취소할까요?"
+    : backup
+      ? "되돌리기 전 백업을 되살릴까요?"
+      : `“${t.subject}” 상태로 되돌릴까요?`;
+  const shown = pv.changes.slice(0, 12);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
+      <div className="rise w-[500px] border border-line bg-panel shadow-2xl shadow-black/60" style={{ borderTop: "2px solid var(--color-teal)" }}>
+        <div className="p-5">
+          <div className="flex items-center gap-2 text-[11px] font-medium tracking-wide text-teal">
+            <RotateCcw size={13} /> {pv.isHead ? "변경 모두 취소" : "되돌리기"}
+          </div>
+          <h3 className="mt-2 text-[16px] leading-snug font-semibold text-fg">{title}</h3>
+          {!pv.isHead && (
+            <p className="mt-1 font-mono text-[11px] text-dim">
+              {t.short} · {t.author} · {timeAgo(t.time)}
+            </p>
+          )}
+
+          {pv.changes.length === 0 ? (
+            <p className="mt-4 text-[13px] text-muted">이미 이 상태와 같아요. 바뀌는 파일이 없어요.</p>
+          ) : (
+            <>
+              <div className="mt-4 mb-1.5 text-[11px] text-muted">이렇게 바뀌어요 · 파일 {pv.changes.length}개</div>
+              <ul className="max-h-56 overflow-y-auto border border-line-soft bg-base">
+                {shown.map((c) => (
+                  <li key={c.kind + c.path} className="flex items-center gap-2 border-b border-line-soft px-3 py-1.5 text-[12px] last:border-0">
+                    <span className="min-w-0 flex-1 truncate font-mono text-fg/90">{c.path}</span>
+                    <span className={`shrink-0 text-[11px] ${KIND_LABEL[c.kind].tone}`}>{KIND_LABEL[c.kind].text}</span>
+                  </li>
+                ))}
+                {pv.changes.length > shown.length && (
+                  <li className="px-3 py-1.5 text-[11px] text-dim">… 외 {pv.changes.length - shown.length}개</li>
+                )}
+              </ul>
+            </>
+          )}
+
+          <div className="mt-4 space-y-2 text-[12px] leading-relaxed">
+            {pv.dirty && (
+              <div className="flex items-start gap-2 border-l-2 border-green/60 pl-3 text-muted">
+                <LifeBuoy size={14} className="mt-0.5 shrink-0 text-green" />
+                <span>
+                  <span className="text-fg">저장 안 한 변경과 새 파일은 지워지지 않아요.</span> ‘되돌리기 전 백업’으로 따로 보관하고,
+                  그래프에서 골라 언제든 되살릴 수 있어요. (.env 처럼 .gitignore 에 있는 파일은 건드리지 않아요)
+                </span>
+              </div>
+            )}
+            {backup && (
+              <div className="flex items-start gap-2 border-l-2 border-line pl-3 text-dim">
+                <LifeBuoy size={14} className="mt-0.5 shrink-0" />
+                <span>되살린 내용은 저장 지점이 아니라 ‘저장 안 한 변경’으로 돌아와요. 확인한 뒤 필요한 것만 골라 커밋하면 돼요.</span>
+              </div>
+            )}
+            {!pv.isHead && !backup && (
+              <div className="flex items-start gap-2 border-l-2 border-line pl-3 text-dim">
+                <GitCommitHorizontal size={14} className="mt-0.5 shrink-0" />
+                <span>지금까지의 기록은 지워지지 않아요. 되돌린 상태가 새 저장 지점으로 하나 더 쌓여서, 온라인에 올린 기록도 안전하게 되돌릴 수 있어요.</span>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line-soft p-4">
+          <button onClick={r.cancelRestore} className="px-4 text-[12px] text-dim hover:text-muted">
+            취소
+          </button>
+          <button
+            onClick={r.doRestore}
+            disabled={r.restoring || pv.changes.length === 0}
+            className="flex items-center gap-1.5 rounded-[3px] bg-teal px-4 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            {r.restoring ? <Spin dark /> : <RotateCcw size={14} />}
+            {pv.isHead ? "변경 취소" : backup ? "되살리기" : "되돌리기"}
+          </button>
+        </div>
       </div>
     </div>
   );

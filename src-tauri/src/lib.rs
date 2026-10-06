@@ -24,6 +24,8 @@ pub fn run() {
       commands::git_finish_merge,
       commands::git_abort_merge,
       commands::startup_path,
+      commands::git_restore_preview,
+      commands::git_restore_to,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

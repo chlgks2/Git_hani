@@ -806,6 +806,170 @@ pub fn abort_merge(path: &str) -> Result<(), String> {
     run_git(root_path, ["merge", "--abort"]).map(|_| ())
 }
 
+/* ---------- 되돌리기 ---------- */
+
+/// 되돌리면 파일 하나가 어떻게 되는지
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreChange {
+    pub path: String,
+    /// "restore" 되살아남(지금은 없음) / "delete" 지워짐 / "modify" 내용이 바뀜 / "clean" 새로 생긴 파일 정리(백업에 보관)
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub target: CommitInfo,
+    pub changes: Vec<RestoreChange>,
+    /// 저장하지 않은 변경(새 파일 포함)이 있는지 — 있으면 되돌리기 전에 백업한다
+    pub dirty: bool,
+    /// 지금 마지막 저장 지점(HEAD)으로 되돌리는 것인지 = 저장 안 한 변경 취소
+    pub is_head: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    /// 만든 백업 갈래 이름 (저장 안 한 변경이 없었으면 None)
+    pub backup: Option<String>,
+    /// 되돌리기로 만든 저장 지점 (지금과 같은 상태라 만들 필요가 없었으면 None)
+    pub commit: Option<CommitResult>,
+    pub changed: usize,
+    /// 백업을 되살린 경우: 저장 지점을 만들지 않고 "저장 안 한 변경"으로 돌려놓았다
+    pub uncommitted: bool,
+}
+
+/// 되돌릴 대상 저장 지점을 확인한다. 16진수 해시 또는 backup/… 갈래 이름만 받는다.
+fn resolve_target(root_path: &Path, target: &str) -> Result<String, String> {
+    let ok_hash = !target.is_empty() && target.chars().all(|c| c.is_ascii_hexdigit());
+    let ok_backup = target.starts_with("backup/") && !target.contains("..") && !target.starts_with('-');
+    if !ok_hash && !ok_backup {
+        return Err("잘못된 저장 지점이에요.".into());
+    }
+    run_git(root_path, ["rev-parse", "--verify", "-q", &format!("{target}^{{commit}}")])
+        .map(|h| h.trim().to_string())
+        .map_err(|_| "그 저장 지점을 찾을 수 없어요.".into())
+}
+
+/// 저장하지 않은 변경이나 새 파일이 있는지 (.gitignore 에 있는 파일은 제외)
+fn is_dirty(root_path: &Path) -> Result<bool, String> {
+    Ok(!run_git(root_path, ["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty())
+}
+
+/// 되돌리기 전에 무엇이 바뀌는지 미리 본다
+pub fn restore_preview(path: &str, target: &str) -> Result<RestorePreview, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    let hash = resolve_target(root_path, target)?;
+    let head = run_git(root_path, ["rev-parse", "HEAD"])?.trim().to_string();
+    let dirty = is_dirty(root_path)?;
+
+    // -R : "지금 → 대상" 방향으로 비교. A=되살아남, D=지워짐, M=바뀜
+    let raw = run_git(root_path, ["diff", "-R", "--no-renames", "--name-status", hash.as_str(), "--"])?;
+    let mut changes: Vec<RestoreChange> = raw
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(code, file)| RestoreChange {
+            path: file.to_string(),
+            kind: match code.chars().next() {
+                Some('A') => "restore",
+                Some('D') => "delete",
+                _ => "modify",
+            }
+            .into(),
+        })
+        .collect();
+    // git 이 아직 모르는 새 파일들은 정리된다 (백업에 보관됨)
+    for f in run_git(root_path, ["ls-files", "--others", "--exclude-standard"])?.lines() {
+        changes.push(RestoreChange { path: f.to_string(), kind: "clean".into() });
+    }
+
+    let info = run_git(
+        root_path,
+        ["log", "-1", "--decorate=full", "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e", hash.as_str()],
+    )?;
+    let target_info = parse_log(&info).into_iter().next().ok_or("저장 지점 정보를 읽지 못했어요.")?;
+    Ok(RestorePreview { target: target_info, changes, dirty, is_head: hash == head })
+}
+
+/// 저장하지 않은 변경(새 파일 포함)을 지금 상태 그대로 backup/… 갈래에 보관한다.
+/// 내 작업 폴더와 stage 상태는 전혀 건드리지 않는다 — 임시 index 파일을 따로 써서 저장 지점을 만든다.
+fn backup_working_state(root_path: &Path) -> Result<String, String> {
+    let tmp_index = run_git(root_path, ["rev-parse", "--git-path", "index.gitgui-backup"])?.trim().to_string();
+    let tmp_index = root_path.join(tmp_index); // 상대 경로로 올 수 있어서 저장소 위치 기준으로
+    let tmp = tmp_index.to_string_lossy().into_owned();
+    let env: &[(&str, &str)] = &[("GIT_INDEX_FILE", tmp.as_str())];
+
+    let result = (|| {
+        run_git_env(root_path, ["read-tree", "HEAD"], env)?; // 마지막 저장 상태에서 출발
+        run_git_env(root_path, ["add", "-A"], env)?; // 지금 폴더 상태(새 파일·삭제 포함)를 담는다
+        let tree = run_git_env(root_path, ["write-tree"], env)?.trim().to_string();
+        let commit = run_git(root_path, ["commit-tree", tree.as_str(), "-p", "HEAD", "-m", "되돌리기 전 백업"])?
+            .trim()
+            .to_string();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 같은 초에 두 번 백업해도 겹치지 않게 저장 지점 해시 앞부분을 붙인다
+        let name = format!("backup/before-restore-{secs}-{}", &commit[..7]);
+        run_git(root_path, ["branch", name.as_str(), commit.as_str()])?;
+        Ok(name)
+    })();
+    std::fs::remove_file(&tmp_index).ok(); // 임시 index 는 성공하든 실패하든 지운다
+    result
+}
+
+/// 고른 저장 지점의 상태로 되돌린다.
+/// 기록은 지우지 않고, 그 상태 그대로의 새 저장 지점을 만든다. 저장 안 한 변경은 먼저 백업한다.
+pub fn restore_to(path: &str, target: &str) -> Result<RestoreResult, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if is_merging(root_path) {
+        return Err("합치는 중에는 되돌릴 수 없어요. 충돌 해결을 마치거나 합치기를 취소해 주세요.".into());
+    }
+    let hash = resolve_target(root_path, target)?;
+    let changed = restore_preview(&root, &hash)?.changes.len();
+    // 되돌리기 전 백업을 되살리는 것인지 — 원래 저장 안 한 작업이었으니 저장 안 한 상태로 돌려놓는다
+    let from_backup = !run_git(root_path, ["for-each-ref", "--points-at", hash.as_str(), "refs/heads/backup/"])?
+        .trim()
+        .is_empty();
+
+    // 1) 저장 안 한 변경이 있으면 백업
+    let backup = if is_dirty(root_path)? { Some(backup_working_state(root_path)?) } else { None };
+
+    // 2) 백업해 둔 경우에만, git 이 모르는 새 파일을 정리한다.
+    //    반드시 되돌리기 "전에" 한다 — 지금의 .gitignore 가 살아 있어야 .env, node_modules 같은
+    //    무시 대상 파일을 건드리지 않는다. (.gitignore 가 없던 시점으로 먼저 되돌리면 그것까지 지워진다)
+    if backup.is_some() {
+        run_git(root_path, ["clean", "-fdq"])?;
+    }
+    // 3) 파일을 그 저장 지점 상태로 (stage 와 작업 폴더 모두). 그때 없던 파일은 지워진다
+    run_git(root_path, ["restore", &format!("--source={hash}"), "--staged", "--worktree", "--", "."])?;
+
+    // 4) 백업을 되살린 경우: stage 만 풀어서 "저장 안 한 변경"으로 남긴다 (파일 내용은 그대로)
+    if from_backup {
+        run_git(root_path, ["reset", "-q"])?;
+        return Ok(RestoreResult { backup, commit: None, changed, uncommitted: true });
+    }
+
+    // 5) 마지막 저장 지점과 달라졌으면 되돌리기 저장 지점을 만든다
+    //    diff --quiet 는 차이가 있으면 실패(Err)로 끝난다
+    let differs = run_git(root_path, ["diff", "--cached", "--quiet", "HEAD"]).is_err();
+    let commit = if differs {
+        let subject = run_git(root_path, ["log", "-1", "--format=%s", hash.as_str()])?.trim().to_string();
+        let short: String = hash.chars().take(7).collect();
+        let msg = format!("되돌리기: “{subject}” 상태로 ({short})");
+        run_git(root_path, ["commit", "-q", "-m", msg.as_str()]).map_err(friendly_commit_error)?;
+        let new = run_git(root_path, ["rev-parse", "HEAD"])?.trim().to_string();
+        Some(CommitResult { short: new.chars().take(7).collect(), hash: new })
+    } else {
+        None
+    };
+    Ok(RestoreResult { backup, commit, changed, uncommitted: false })
+}
+
 /* ---------- 저장 지점 하나의 변경 요약 ---------- */
 
 #[derive(Debug, Serialize)]
@@ -1330,6 +1494,104 @@ mod tests {
         assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "첫 줄\n내가 바꾼 줄\n끝 줄\n");
         assert!(work.join("gone.txt").exists());
         cleanup(&[&work, &bare, &mate]);
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        std::fs::read_to_string(dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn restore_to_older_commit_keeps_history() {
+        let dir = temp_repo("restore-old");
+        let p = dir.to_string_lossy().into_owned();
+        write(&dir, "a.txt", "잘 되던 내용");
+        let good = commit(&p, &["a.txt".into()], "잘 되던 때", None).unwrap();
+        write(&dir, "a.txt", "망가진 내용");
+        write(&dir, "b.txt", "AI 가 만든 파일");
+        commit(&p, &["a.txt".into(), "b.txt".into()], "AI 수정", None).unwrap();
+
+        let pv = restore_preview(&p, &good.hash).unwrap();
+        assert!(!pv.dirty && !pv.is_head);
+        assert!(pv.changes.contains(&RestoreChange { path: "a.txt".into(), kind: "modify".into() }));
+        assert!(pv.changes.contains(&RestoreChange { path: "b.txt".into(), kind: "delete".into() }));
+
+        let r = restore_to(&p, &good.hash).unwrap();
+        assert!(r.backup.is_none() && r.commit.is_some());
+        assert_eq!(read(&dir, "a.txt"), "잘 되던 내용");
+        assert!(!dir.join("b.txt").exists());
+        // 기록은 지워지지 않고 하나 더 쌓인다
+        let log = history(&p, None).unwrap();
+        assert_eq!(log.len(), 3);
+        assert!(log[0].subject.starts_with("되돌리기: “잘 되던 때” 상태로"));
+        assert!(status(&p).unwrap().files.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn restore_backs_up_uncommitted_work() {
+        let dir = temp_repo("restore-dirty");
+        let p = dir.to_string_lossy().into_owned();
+        write(&dir, "a.txt", "저장된 내용");
+        let saved = commit(&p, &["a.txt".into()], "저장", None).unwrap();
+        write(&dir, ".gitignore", ".env\n");
+        commit(&p, &[".gitignore".into()], "무시 목록", None).unwrap();
+        write(&dir, "a.txt", "저장 안 한 수정");
+        write(&dir, "new.txt", "새 파일");
+        write(&dir, ".env", "KEY=1");
+
+        let pv = restore_preview(&p, &saved.hash).unwrap();
+        assert!(pv.dirty);
+        assert!(pv.changes.contains(&RestoreChange { path: "new.txt".into(), kind: "clean".into() }));
+
+        let r = restore_to(&p, &saved.hash).unwrap();
+        let backup = r.backup.expect("백업 갈래가 있어야 한다");
+        assert_eq!(read(&dir, "a.txt"), "저장된 내용");
+        assert!(!dir.join("new.txt").exists()); // 새 파일은 정리되고
+        assert!(dir.join(".env").exists()); // .gitignore 파일은 그대로
+        // 백업 갈래에는 저장 안 했던 내용과 새 파일이 그대로 있어야 한다
+        assert_eq!(run_git(&dir, ["show", &format!("{backup}:a.txt")]).unwrap(), "저장 안 한 수정");
+        assert_eq!(run_git(&dir, ["show", &format!("{backup}:new.txt")]).unwrap(), "새 파일");
+        // 백업에서 다시 되살릴 수 있다 — 저장 지점을 만들지 않고 "저장 안 한 변경"으로 돌아온다
+        let commits_before = run_git(&dir, ["rev-list", "--count", "HEAD"]).unwrap();
+        let revived = restore_to(&p, &backup).unwrap();
+        assert!(revived.uncommitted && revived.commit.is_none());
+        assert_eq!(read(&dir, "a.txt"), "저장 안 한 수정");
+        assert_eq!(read(&dir, "new.txt"), "새 파일");
+        assert_eq!(run_git(&dir, ["rev-list", "--count", "HEAD"]).unwrap(), commits_before);
+        let mut left: Vec<String> = status(&p).unwrap().files.into_iter().map(|f| f.path).collect();
+        left.sort();
+        assert!(left.contains(&"a.txt".to_string()) && left.contains(&"new.txt".to_string()));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn discard_changes_back_to_head() {
+        let dir = temp_repo("restore-head");
+        let p = dir.to_string_lossy().into_owned();
+        write(&dir, "a.txt", "저장된 내용");
+        let head = commit(&p, &["a.txt".into()], "저장", None).unwrap();
+        write(&dir, "a.txt", "AI 가 망친 내용");
+
+        let pv = restore_preview(&p, &head.hash).unwrap();
+        assert!(pv.is_head && pv.dirty);
+        let r = restore_to(&p, &head.hash).unwrap();
+        assert!(r.backup.is_some());
+        assert!(r.commit.is_none()); // 마지막 저장 상태 그대로라 새 저장 지점은 필요 없다
+        assert_eq!(read(&dir, "a.txt"), "저장된 내용");
+        // 지금 갈래의 기록은 그대로 1개 (백업은 따로 backup/ 갈래에 있다)
+        assert_eq!(run_git(&dir, ["rev-list", "--count", "HEAD"]).unwrap().trim(), "1");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn restore_rejects_bad_targets() {
+        let dir = temp_repo("restore-bad");
+        let p = dir.to_string_lossy().into_owned();
+        save(&dir, "a.txt", "1");
+        assert!(restore_to(&p, "--hard").is_err());
+        assert!(restore_to(&p, "main").is_err()); // 해시나 backup/ 갈래만
+        assert!(restore_to(&p, "deadbeef").is_err()); // 없는 저장 지점
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

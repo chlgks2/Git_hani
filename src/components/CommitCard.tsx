@@ -12,6 +12,8 @@ export interface CardData {
   position?: string;
   unpushed?: boolean;
   incoming?: boolean;
+  /** 카드 맨 아래 작은 안내 */
+  hint?: string;
   /** undefined: 표시 안 함, "loading": 불러오는 중 */
   stats?: FileStat[] | "loading";
   /** 저장 안 된 변경 줄처럼 줄 수 없이 파일 이름만 보여줄 때 */
@@ -103,6 +105,8 @@ export default function CommitCard({ d, x, y, above }: { d: CardData; x: number;
           )}
         </div>
       )}
+
+      {d.hint && <div className="border-t border-line-soft px-3 py-1.5 text-[10px] text-dim">{d.hint}</div>}
 
       {d.fileNames && (
         <ul className="space-y-0.5 border-t border-line-soft px-3 py-2 font-mono text-[11px] text-fg/80">

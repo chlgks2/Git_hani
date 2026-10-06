@@ -107,3 +107,13 @@ pub fn startup_path() -> Option<String> {
     // args().nth(1) : 0번은 실행 파일 자신, 1번이 첫 번째 인자
     std::env::args().nth(1).filter(|p| std::path::Path::new(p).is_dir())
 }
+
+#[tauri::command]
+pub async fn git_restore_preview(path: String, target: String) -> Result<git::RestorePreview, String> {
+    blocking(move || git::restore_preview(&path, &target)).await
+}
+
+#[tauri::command]
+pub async fn git_restore_to(path: String, target: String) -> Result<git::RestoreResult, String> {
+    blocking(move || git::restore_to(&path, &target)).await
+}

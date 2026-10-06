@@ -48,3 +48,8 @@ pub async fn git_unpushed(path: String) -> Result<Vec<git::UnpushedCommit>, Stri
 pub async fn git_push(path: String, up_to: Option<String>) -> Result<git::PushResult, String> {
     blocking(move || git::push(&path, up_to.as_deref())).await
 }
+
+#[tauri::command]
+pub async fn git_commit_stats(path: String, hash: String) -> Result<Vec<git::FileStat>, String> {
+    blocking(move || git::commit_stats(&path, &hash)).await
+}

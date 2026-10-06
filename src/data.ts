@@ -136,6 +136,58 @@ export interface Commit {
 
 export const LANE_COLORS = ["var(--color-teal)", "var(--color-magenta)", "var(--color-amber)"];
 
+/** 데모 저장 지점마다 바뀐 파일과 줄 수 (그래프 점에 마우스를 올리면 보여줌) */
+export const DEMO_STATS: Record<string, { path: string; added: number | null; deleted: number | null }[]> = {
+  c5: [{ path: "index.html", added: 2, deleted: 2 }],
+  m1: [
+    { path: "gallery.html", added: 48, deleted: 0 },
+    { path: "assets/store-1.jpg", added: null, deleted: null },
+    { path: "assets/store-2.jpg", added: null, deleted: null },
+    { path: "assets/store-3.jpg", added: null, deleted: null },
+    { path: "index.html", added: 3, deleted: 0 },
+  ],
+  g2: [
+    { path: "gallery.html", added: 18, deleted: 2 },
+    { path: "assets/store-1.jpg", added: null, deleted: null },
+    { path: "assets/store-2.jpg", added: null, deleted: null },
+    { path: "assets/store-3.jpg", added: null, deleted: null },
+  ],
+  g1: [
+    { path: "gallery.html", added: 32, deleted: 0 },
+    { path: "index.html", added: 3, deleted: 0 },
+  ],
+  c2: [
+    { path: "index.html", added: 14, deleted: 1 },
+    { path: "style.css", added: 6, deleted: 0 },
+  ],
+  c1: [
+    { path: "index.html", added: 62, deleted: 0 },
+    { path: "menu.html", added: 41, deleted: 0 },
+    { path: "menu.js", added: 12, deleted: 0 },
+    { path: "style.css", added: 88, deleted: 0 },
+    { path: "data.json", added: 9, deleted: 0 },
+    { path: "README.md", added: 4, deleted: 0 },
+    { path: "assets/logo.png", added: null, deleted: null },
+  ],
+  revert: [
+    { path: "menu.js", added: 4, deleted: 2 },
+    { path: "data.json", added: 1, deleted: 1 },
+  ],
+  backup: [
+    { path: "menu.js", added: 2, deleted: 4 },
+    { path: "data.json", added: 1, deleted: 1 },
+  ],
+};
+
+/** 새로 만든 데모 저장 지점의 줄 수: 파일별 diff 의 +/- 줄을 센다 */
+export function demoStatsFor(files: string[]) {
+  return CHANGED_FILES.filter((f) => files.includes(f.path)).map((f) => ({
+    path: f.path,
+    added: f.diff.filter((l) => l.type === "add").length,
+    deleted: f.diff.filter((l) => l.type === "del").length,
+  }));
+}
+
 // 오래된 순서가 아래 (배열은 최신이 위)
 export const BASE_COMMITS: Commit[] = [
   { id: "c5", hash: "a41f9e2", msg: "영업시간 안내 수정", when: "어제 18:40", lane: 0, parents: ["m1"], preview: "before" },

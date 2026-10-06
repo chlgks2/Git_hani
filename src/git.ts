@@ -69,6 +69,17 @@ export function gitPush(path: string, upTo?: string) {
   return invoke<{ remote: string; branch: string; created: boolean }>("git_push", { path, upTo: upTo ?? null });
 }
 
+/** 저장 지점 하나에서 바뀐 파일과 줄 수 (바이너리 파일은 null) */
+export interface FileStat {
+  path: string;
+  added: number | null;
+  deleted: number | null;
+}
+
+export function gitCommitStats(path: string, hash: string) {
+  return invoke<FileStat[]>("git_commit_stats", { path, hash });
+}
+
 /** 비밀 정보가 들어 있을 가능성이 큰 파일 이름 */
 const SECRET_PATTERNS = [
   /^\.env(\..+)?$/, // .env, .env.local …

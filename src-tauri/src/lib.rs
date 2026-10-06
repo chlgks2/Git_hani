@@ -13,6 +13,7 @@ pub fn run() {
       commands::git_commit,
       commands::git_unpushed,
       commands::git_push,
+      commands::git_commit_stats,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

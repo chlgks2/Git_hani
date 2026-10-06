@@ -300,7 +300,7 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
 
   return (
     <>
-      <RealGraph commits={r.commits} changeCount={repo.files.length} unpushed={r.unpushed} />
+      <RealGraph root={repo.root} commits={r.commits} fileNames={repo.files.map((f) => f.path)} unpushed={r.unpushed} />
       {splitter}
       <section className="flex shrink-0 flex-col bg-panel" style={{ height: termH }}>
         <div className="flex h-8 shrink-0 items-center border-b border-line-soft px-3 text-[12px] text-fg">

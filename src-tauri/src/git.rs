@@ -458,6 +458,51 @@ fn friendly_push_error(e: String) -> String {
     msg.to_string()
 }
 
+/* ---------- 저장 지점 하나의 변경 요약 ---------- */
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub path: String,
+    /// 추가된 줄 수. 이미지 같은 바이너리 파일이면 None
+    pub added: Option<u32>,
+    /// 지워진 줄 수. 바이너리 파일이면 None
+    pub deleted: Option<u32>,
+}
+
+/// 저장 지점 하나에서 바뀐 파일과 줄 수.
+/// 합친(merge) 저장 지점은 첫 부모와 비교한다 = "이 합치기로 들어온 변경"
+pub fn commit_stats(path: &str, hash: &str) -> Result<Vec<FileStat>, String> {
+    // 해시는 16진수 글자만 허용 (다른 옵션이 끼어들지 못하게)
+    if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("잘못된 저장 지점이에요.".into());
+    }
+    let root = repo_root(path)?;
+    // --numstat : "추가<TAB>삭제<TAB>파일" 형식. -m --first-parent : merge 는 첫 부모와 비교
+    let raw = run_git(
+        Path::new(&root),
+        ["show", "--numstat", "--format=", "-m", "--first-parent", hash],
+    )?;
+    Ok(parse_numstat(&raw))
+}
+
+fn parse_numstat(raw: &str) -> Vec<FileStat> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut cols = line.splitn(3, '\t');
+            // ? : 칸이 모자라면 이 줄은 None 으로 건너뛴다
+            let added = cols.next()?;
+            let deleted = cols.next()?;
+            let file = cols.next()?;
+            Some(FileStat {
+                path: file.to_string(),
+                added: added.parse().ok(), // 바이너리는 "-" 라서 parse 실패 → None
+                deleted: deleted.parse().ok(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +735,30 @@ mod tests {
         save(&dir, "a.txt", "1");
         assert!(push(&p, None).unwrap_err().contains("연결되어 있지 않아요"));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stats_of_a_commit() {
+        let dir = temp_repo("stats");
+        write(&dir, "a.txt", "1\n2\n3\n");
+        let p = dir.to_string_lossy().into_owned();
+        commit(&p, &["a.txt".into()], "세 줄", None).unwrap();
+        write(&dir, "a.txt", "1\n둘\n3\n4\n");
+        let c = commit(&p, &["a.txt".into()], "수정", None).unwrap();
+
+        let stats = commit_stats(&p, &c.hash).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].path, "a.txt");
+        assert_eq!((stats[0].added, stats[0].deleted), (Some(2), Some(1)));
+        assert!(commit_stats(&p, "--all").is_err()); // 옵션처럼 생긴 값은 거절
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn numstat_binary_file() {
+        let v = parse_numstat("-\t-\tlogo.png\n3\t0\tREADME.md\n");
+        assert_eq!(v[0].added, None);
+        assert_eq!(v[1].added, Some(3));
     }
 
     #[test]

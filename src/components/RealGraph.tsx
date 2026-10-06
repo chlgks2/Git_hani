@@ -1,8 +1,10 @@
 // 실제 저장소의 저장 기록 그래프 (git log)
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowUp, Check, Cloud, GitBranch, Tag } from "lucide-react";
-import { timeAgo, type CommitInfo, type UnpushedCommit } from "../git";
+import { gitCommitStats, timeAgo, type CommitInfo, type FileStat, type UnpushedCommit } from "../git";
+import { buildInsights } from "../graphInsights";
 import { layoutGraph } from "../graphLayout";
+import CommitCard, { type CardData } from "./CommitCard";
 import { GitChip } from "./Term";
 
 const ROW = 30;
@@ -42,15 +44,21 @@ function parseRefs(refs: string[]): Label[] {
 }
 
 export default function RealGraph({
+  root,
   commits,
-  changeCount,
+  fileNames,
   unpushed,
 }: {
+  root: string;
   commits: CommitInfo[];
-  changeCount: number;
+  /** 아직 저장하지 않은 파일들 */
+  fileNames: string[];
   unpushed: UnpushedCommit[];
 }) {
+  const changeCount = fileNames.length;
   const [selected, setSelected] = useState<string | null>(null);
+  const [hover, setHover] = useState<string | null>(null);
+  const [stats, setStats] = useState<Map<string, FileStat[]>>(new Map());
   const notPushed = useMemo(() => new Set(unpushed.map((c) => c.hash)), [unpushed]);
 
   const { rows, layout } = useMemo(() => {
@@ -72,6 +80,36 @@ export default function RealGraph({
       : commits;
     return { rows, layout: layoutGraph(rows) };
   }, [commits, changeCount]);
+
+  // 점마다 "여기서 무슨 일이 있었는지" 미리 계산
+  const insights = useMemo(() => {
+    const names = new Map<string, string[]>();
+    let mainName = "main";
+    for (const c of commits) {
+      const labels = parseRefs(c.refs);
+      // 내 갈래 이름을 먼저, 없으면 온라인 갈래 이름(origin/ 뗀 것)
+      const local = labels.filter((l) => l.kind === "head" || l.kind === "local").map((l) => l.text);
+      const remote = labels.filter((l) => l.kind === "remote").map((l) => l.text.split("/").slice(1).join("/"));
+      if (local.length || remote.length) names.set(c.hash, [...local, ...remote]);
+      const head = labels.find((l) => l.kind === "head");
+      if (head) mainName = head.text;
+    }
+    const head = commits.find((c) => c.refs.some((r) => r === "HEAD" || r.startsWith("HEAD -> ")))?.hash ?? null;
+    const input = rows.flatMap((c, i) => (c.wip ? [] : [{ hash: c.hash, parents: c.parents, subject: c.subject, lane: layout.lanes[i] }]));
+    return buildInsights(input, names, head, mainName);
+  }, [commits, rows, layout]);
+
+  // 다른 저장소를 열면 불러 둔 변경 요약을 비운다
+  useEffect(() => setStats(new Map()), [root]);
+
+  // 마우스를 올린 저장 지점의 바뀐 파일·줄 수를 그때 불러온다 (한 번 불러오면 기억)
+  useEffect(() => {
+    if (!hover || hover === WIP || stats.has(hover)) return;
+    const h = hover;
+    gitCommitStats(root, h)
+      .then((list) => setStats((m) => new Map(m).set(h, list)))
+      .catch(() => setStats((m) => new Map(m).set(h, [])));
+  }, [hover, root, stats]);
 
   const graphW = Math.max(60, laneX(layout.laneCount - 1) + 22);
   const height = rows.length * ROW;
@@ -156,22 +194,80 @@ export default function RealGraph({
               const x = laneX(layout.lanes[r]);
               const y = rowY(r);
               const col = color(layout.lanes[r]);
-              if (c.wip) return <circle key={c.hash} cx={x} cy={y} r={6} fill="#121417" stroke={col} strokeWidth={1.5} strokeDasharray="2.5 2" />;
-              if (c.parents.length > 1) return <circle key={c.hash} cx={x} cy={y} r={4} fill={col} />;
               const isHead = c.refs.some((ref) => ref === "HEAD" || ref.startsWith("HEAD -> "));
+              let node: React.ReactNode;
+              if (c.wip) node = <circle cx={x} cy={y} r={6} fill="#121417" stroke={col} strokeWidth={1.5} strokeDasharray="2.5 2" />;
+              else if (c.parents.length > 1) node = <circle cx={x} cy={y} r={4} fill={col} />;
+              else
+                node = (
+                  <>
+                    {isHead && <circle cx={x} cy={y} r={10} fill={col} opacity={0.2} />}
+                    <circle cx={x} cy={y} r={6} fill="#121417" stroke={col} strokeWidth={2} />
+                    <circle cx={x} cy={y} r={2.3} fill={col} />
+                  </>
+                );
               return (
-                <g key={c.hash}>
-                  {isHead && <circle cx={x} cy={y} r={10} fill={col} opacity={0.2} />}
-                  <circle cx={x} cy={y} r={6} fill="#121417" stroke={col} strokeWidth={2} />
-                  <circle cx={x} cy={y} r={2.3} fill={col} />
+                <g
+                  key={c.hash}
+                  style={{
+                    transformOrigin: `${x}px ${y}px`,
+                    transform: hover === c.hash ? "scale(1.45)" : "scale(1)",
+                    transition: "transform 120ms ease-out",
+                  }}
+                >
+                  {node}
+                  {/* 마우스를 잡기 쉽게 점보다 넓은 투명 영역 */}
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r={11}
+                    fill="transparent"
+                    style={{ pointerEvents: "all", cursor: "pointer" }}
+                    onMouseEnter={() => setHover(c.hash)}
+                    onMouseLeave={() => setHover((h) => (h === c.hash ? null : h))}
+                  />
                 </g>
               );
             })}
           </svg>
+
+          {hover && renderCard()}
         </div>
       </div>
     </section>
   );
+
+  // 컴포넌트가 아니라 함수로 그려서, 내용이 갱신될 때 카드가 다시 나타나는 애니메이션이 반복되지 않게 한다
+  function renderCard() {
+    const r = rows.findIndex((c) => c.hash === hover);
+    if (r < 0) return null;
+    const c = rows[r];
+    const lane = layout.lanes[r];
+    const ins = insights.get(c.hash);
+    const d: CardData = c.wip
+      ? {
+          short: "",
+          subject: c.subject,
+          when: "지금",
+          color: color(lane),
+          events: ["아직 저장하지 않은 변경이에요. 오른쪽에서 골라 커밋할 수 있어요"],
+          fileNames,
+        }
+      : {
+          short: c.short,
+          subject: c.subject,
+          author: c.author,
+          when: timeAgo(c.time),
+          color: color(lane),
+          events: ins?.events ?? [],
+          position: ins?.position,
+          unpushed: notPushed.has(c.hash),
+          stats: stats.get(c.hash) ?? "loading",
+        };
+    // 아래쪽 점은 카드를 위로 띄워 잘리지 않게
+    const above = r > 3 && r > rows.length - 7;
+    return <CommitCard d={d} x={LABEL_W + laneX(lane) + 18} y={rowY(r) + (above ? 14 : -14)} above={above} />;
+  }
 }
 
 /** 부모로 이어지는 선: 필요하면 출발 직후 지나갈 레인으로 꺾고, 도착 직전에 부모 레인으로 꺾는다 */

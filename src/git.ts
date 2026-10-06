@@ -31,6 +31,8 @@ export interface RepoStatus {
   ahead: number;
   behind: number;
   noCommits: boolean;
+  /** 연결된 온라인 저장소 이름들 (보통 "origin") */
+  remotes: string[];
   files: FileChange[];
 }
 
@@ -51,6 +53,20 @@ export function gitCommit(path: string, files: string[], message: string, descri
     message,
     description: description.trim() || null,
   });
+}
+
+/** 아직 온라인에 올리지 않은 저장 지점 (최신이 앞) */
+export interface UnpushedCommit extends CommitInfo {
+  files: string[];
+}
+
+export function gitUnpushed(path: string) {
+  return invoke<UnpushedCommit[]>("git_unpushed", { path });
+}
+
+/** upTo 를 주면 그 저장 지점까지만, 없으면 지금 갈래 전체를 올린다 */
+export function gitPush(path: string, upTo?: string) {
+  return invoke<{ remote: string; branch: string; created: boolean }>("git_push", { path, upTo: upTo ?? null });
 }
 
 /** 비밀 정보가 들어 있을 가능성이 큰 파일 이름 */

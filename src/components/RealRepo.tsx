@@ -1,10 +1,12 @@
 // 실제 저장소 모드: 사용자가 고른 폴더의 상태·저장 기록을 보여주고, 고른 파일을 커밋한다.
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, CloudOff, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, KeyRound, RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Cloud, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, KeyRound, RefreshCw } from "lucide-react";
 import {
   gitCommit,
   gitLog,
+  gitPush,
   gitStatus,
+  gitUnpushed,
   looksSecret,
   pickFolder,
   STATUS_LABEL,
@@ -12,6 +14,7 @@ import {
   type CommitInfo,
   type FileChange,
   type RepoStatus,
+  type UnpushedCommit,
 } from "../git";
 import type { Block } from "../store";
 import RealGraph from "./RealGraph";
@@ -20,6 +23,9 @@ import { BlockView } from "./Terminal";
 import { GitChip } from "./Term";
 
 let seq = 1;
+
+/** 비밀 정보로 보이는 파일이 있어 확인이 필요한 상황 */
+type SecretAsk = { mode: "commit"; files: string[] } | { mode: "push"; files: string[]; upTo?: string };
 
 export function useRealRepo() {
   const [repo, setRepo] = useState<RepoStatus | null>(null);
@@ -30,7 +36,9 @@ export function useRealRepo() {
   const [message, setMessage] = useState("");
   const [description, setDescription] = useState("");
   const [committing, setCommitting] = useState(false);
-  const [secretAsk, setSecretAsk] = useState<string[] | null>(null); // 확인이 필요한 비밀 파일들
+  const [unpushed, setUnpushed] = useState<UnpushedCommit[]>([]);
+  const [pushing, setPushing] = useState<string | null>(null); // 올리는 중인 대상 (해시 또는 "all")
+  const [secretAsk, setSecretAsk] = useState<SecretAsk | null>(null);
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -44,7 +52,11 @@ export function useRealRepo() {
 
   /** 상태와 기록을 다시 읽어 화면에 반영한다 */
   const fetchAll = async (path: string) => {
-    const [st, list] = await Promise.all([gitStatus(path), gitLog(path)]);
+    const [st, list, ahead] = await Promise.all([
+      gitStatus(path),
+      gitLog(path),
+      gitUnpushed(path).catch(() => [] as UnpushedCommit[]),
+    ]);
     pathRef.current = st.root;
     // 체크 상태 유지: 이미 있던 파일은 그대로, 새로 나타난 파일은 체크 (비밀 정보로 보이면 체크 안 함)
     const next = new Set<string>();
@@ -56,6 +68,7 @@ export function useRealRepo() {
     setChecked(next);
     setRepo(st);
     setCommits(list);
+    setUnpushed(ahead);
     return st;
   };
 
@@ -85,6 +98,7 @@ export function useRealRepo() {
     seen.current = new Set();
     setRepo(null);
     setCommits([]);
+    setUnpushed([]);
     setLog([]);
   };
 
@@ -111,7 +125,7 @@ export function useRealRepo() {
 
     const secrets = picked.map((f) => f.path).filter(looksSecret);
     if (secrets.length && !opts.force) {
-      setSecretAsk(secrets);
+      setSecretAsk({ mode: "commit", files: secrets });
       return;
     }
     setSecretAsk(null);
@@ -134,7 +148,7 @@ export function useRealRepo() {
           ...picked.slice(0, 20).map((f) => ({ tone: "dim" as const, text: `  ${f.status}  ${f.path}` })),
           ...(picked.length > 20 ? [{ tone: "dim" as const, text: `  … 외 ${picked.length - 20}개` }] : []),
           ...(opts.exclude?.length ? [{ tone: "ok" as const, text: `비밀 정보로 보이는 파일 ${opts.exclude.length}개는 빼고 저장했어요` }] : []),
-          { tone: "dim", text: "아직 온라인에는 안 올라갔어요. 올리기는 다음 단계에서 연결돼요." },
+          { tone: "dim", text: "아직 온라인에는 안 올라갔어요. 오른쪽 ‘올리기’를 누르면 올라가요." },
         ],
       });
       setMessage("");
@@ -144,6 +158,61 @@ export function useRealRepo() {
       addBlock({ title: "커밋하기", git: "git commit", lines: [{ tone: "err", text: String(e) }] });
     } finally {
       setCommitting(false);
+    }
+  };
+
+
+  /**
+   * 저장 지점을 온라인에 올린다. upTo 가 있으면 그 저장 지점까지만.
+   * 올라갈 저장 지점 안에 비밀 정보로 보이는 파일이 있으면 먼저 확인한다.
+   */
+  const push = async (opts: { upTo?: string; force?: boolean } = {}) => {
+    if (!repo || pushing || !unpushed.length) return;
+    // 올라가는 범위: upTo 와 그보다 오래된 것들 (목록은 최신이 앞)
+    const idx = opts.upTo ? unpushed.findIndex((c) => c.hash === opts.upTo) : 0;
+    if (idx < 0) return;
+    const targets = unpushed.slice(idx);
+    const secrets = [...new Set(targets.flatMap((c) => c.files).filter(looksSecret))];
+    if (secrets.length && !opts.force) {
+      setSecretAsk({ mode: "push", files: secrets, upTo: opts.upTo });
+      return;
+    }
+    setSecretAsk(null);
+
+    const all = idx === 0;
+    const target = targets[0];
+    const title =
+      targets.length === 1
+        ? `“${target.subject}” 올리기`
+        : all
+          ? `모두 올리기 (${targets.length}개)`
+          : `“${target.subject}”까지 올리기 (${targets.length}개)`;
+    const remoteBranch = repo.upstream ?? `${repo.remotes.includes("origin") ? "origin" : repo.remotes[0]}/${repo.branch}`;
+    setPushing(all ? "all" : target.hash);
+    try {
+      const res = await gitPush(repo.root, all ? undefined : target.hash);
+      addBlock({
+        title,
+        git: res.created
+          ? `git push -u ${res.remote} ${res.branch}`
+          : `git push ${res.remote} ${all ? "HEAD" : target.short}:${res.branch}`,
+        lines: [
+          { tone: "ok", text: `저장 지점 ${targets.length}개를 온라인(${res.remote}/${res.branch})에 올렸어요` },
+          ...targets.slice(0, 20).map((c) => ({ tone: "dim" as const, text: `  ${c.short}  ${c.subject}` })),
+          ...(res.created ? [{ tone: "ok" as const, text: "온라인에 이 갈래를 새로 만들고 연결했어요. 다음부터는 바로 올라가요." }] : []),
+          ...(!all && targets.length > 1
+            ? [{ tone: "dim" as const, text: "Git 은 순서대로 쌓여서, 그 전 저장 지점도 함께 올라갔어요." }]
+            : []),
+          ...(unpushed.length - targets.length > 0
+            ? [{ tone: "plain" as const, text: `아직 올리지 않은 저장 지점 ${unpushed.length - targets.length}개가 남아 있어요.` }]
+            : []),
+        ],
+      });
+      await fetchAll(repo.root);
+    } catch (e) {
+      addBlock({ title, git: `git push ${remoteBranch}`, lines: [{ tone: "err", text: String(e) }] });
+    } finally {
+      setPushing(null);
     }
   };
 
@@ -159,7 +228,8 @@ export function useRealRepo() {
 
   return {
     repo, commits, loading, log, checked, message, setMessage, description, setDescription, committing, secretAsk,
-    open, refresh, close, toggle, toggleAll, commit, cancelSecret: () => setSecretAsk(null),
+    unpushed, pushing,
+    open, refresh, close, toggle, toggleAll, commit, push, cancelSecret: () => setSecretAsk(null),
   };
 }
 
@@ -230,7 +300,7 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
 
   return (
     <>
-      <RealGraph commits={r.commits} changeCount={repo.files.length} />
+      <RealGraph commits={r.commits} changeCount={repo.files.length} unpushed={r.unpushed} />
       {splitter}
       <section className="flex shrink-0 flex-col bg-panel" style={{ height: termH }}>
         <div className="flex h-8 shrink-0 items-center border-b border-line-soft px-3 text-[12px] text-fg">
@@ -332,14 +402,16 @@ export function RealInspector({ r }: { r: RealRepo }) {
                   ? "저장할 파일을 하나 이상 체크해 주세요."
                   : !r.message.trim()
                     ? "무엇을 바꿨는지 짧게 적어 주세요. (Ctrl+Enter 로 바로 커밋)"
-                    : "체크한 파일만 내 컴퓨터에 저장 지점으로 기록돼요. 온라인 올리기는 다음 단계에서 연결돼요."}
+                    : "체크한 파일만 내 컴퓨터에 저장 지점으로 기록돼요. 온라인에는 아래 ‘올리기’로 올려요."}
               </p>
             </div>
           </div>
         )}
+
+        <PushPanel r={r} />
       </aside>
 
-      {r.secretAsk && <SecretModal r={r} files={r.secretAsk} />}
+      {r.secretAsk && <SecretModal r={r} ask={r.secretAsk} />}
     </>
   );
 }
@@ -364,41 +436,157 @@ function FileRow({ f, on, toggle }: { f: FileChange; on: boolean; toggle: () => 
   );
 }
 
-function SecretModal({ r, files }: { r: RealRepo; files: string[] }) {
+function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
+  const forPush = ask.mode === "push";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
-      <div className="rise w-[460px] border border-line bg-panel shadow-2xl shadow-black/60" style={{ borderTop: "2px solid var(--color-amber)" }}>
+      <div
+        className="rise w-[460px] border border-line bg-panel shadow-2xl shadow-black/60"
+        style={{ borderTop: `2px solid var(--color-${forPush ? "red" : "amber"})` }}
+      >
         <div className="p-5">
-          <div className="flex items-center gap-2 text-[11px] font-medium tracking-wide text-amber">
-            <KeyRound size={13} /> 저장 전 확인
+          <div className={`flex items-center gap-2 text-[11px] font-medium tracking-wide ${forPush ? "text-red" : "text-amber"}`}>
+            <KeyRound size={13} /> {forPush ? "올리기 전 확인" : "저장 전 확인"}
           </div>
-          <h3 className="mt-2 text-[16px] font-semibold text-fg">비밀 정보가 들어 있을 수 있는 파일이 있어요</h3>
+          <h3 className="mt-2 text-[16px] font-semibold text-fg">
+            {forPush ? "올라갈 저장 지점에 비밀 정보 파일이 들어 있어요" : "비밀 정보가 들어 있을 수 있는 파일이 있어요"}
+          </h3>
           <ul className="mt-3 space-y-1 border border-line-soft bg-base px-3 py-2 font-mono text-[12px] text-fg">
-            {files.map((f) => (
+            {ask.files.map((f) => (
               <li key={f}>{f}</li>
             ))}
           </ul>
-          <p className="mt-3 text-[12px] leading-relaxed text-amber/90">
-            API 키나 비밀번호가 담긴 파일을 저장해서 온라인에 올리면 다른 사람이 볼 수 있고, 한 번 올라간 기록은 지워도
-            남아요.
+          <p className={`mt-3 text-[12px] leading-relaxed ${forPush ? "text-red/90" : "text-amber/90"}`}>
+            {forPush
+              ? "온라인에 올리면 저장소를 볼 수 있는 사람 누구나 이 내용을 볼 수 있고, 한 번 올라간 기록은 지워도 남아요. 올렸다면 키를 새로 발급받는 게 안전해요."
+              : "API 키나 비밀번호가 담긴 파일을 저장해서 온라인에 올리면 다른 사람이 볼 수 있고, 한 번 올라간 기록은 지워도 남아요."}
           </p>
         </div>
-        <div className="flex flex-col gap-1 border-t border-line-soft p-4">
-          <button
-            onClick={() => r.commit({ exclude: files })}
-            className="rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
-          >
-            이 파일은 빼고 저장하기 (권장)
-          </button>
-          <button onClick={() => r.commit({ force: true })} className="py-1.5 text-[12px] text-dim hover:text-muted">
-            그래도 포함해서 저장할게요
-          </button>
-          <button onClick={r.cancelSecret} className="py-1 text-[11px] text-dim hover:text-muted">
-            취소
-          </button>
-        </div>
+        {forPush ? (
+          <div className="flex justify-end gap-2 border-t border-line-soft p-4">
+            <button onClick={() => r.push({ upTo: ask.upTo, force: true })} className="px-3 text-[12px] text-dim hover:text-red">
+              그래도 올리기
+            </button>
+            <button
+              onClick={r.cancelSecret}
+              className="rounded-[3px] bg-teal px-4 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
+            >
+              올리지 않기
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1 border-t border-line-soft p-4">
+            <button
+              onClick={() => r.commit({ exclude: ask.files })}
+              className="rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
+            >
+              이 파일은 빼고 저장하기 (권장)
+            </button>
+            <button onClick={() => r.commit({ force: true })} className="py-1.5 text-[12px] text-dim hover:text-muted">
+              그래도 포함해서 저장할게요
+            </button>
+            <button onClick={r.cancelSecret} className="py-1 text-[11px] text-dim hover:text-muted">
+              취소
+            </button>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+/* ---------- 올리기 (push) ---------- */
+
+function PushPanel({ r }: { r: RealRepo }) {
+  const repo = r.repo!;
+  const list = r.unpushed; // 최신이 앞
+  const n = list.length;
+  const canPartial = !!repo.upstream; // 처음 올리는 갈래는 한꺼번에만
+  const busy = r.pushing != null;
+
+  let note: string | null = null;
+  if (!repo.remotes.length) note = "온라인 저장소(GitHub 등)와 연결되어 있지 않아서 올릴 수 없어요.";
+  else if (!repo.branch) note = "갈래가 아닌 곳(특정 저장 지점)에 있어서 올릴 수 없어요.";
+
+  return (
+    <div className="border-t border-line-soft">
+      <div className="flex h-8 items-center gap-2 border-b border-line-soft px-4 text-[11px] font-medium tracking-wide text-muted">
+        올리기 <GitChip term="push" />
+        <span className="ml-auto text-[11px] font-normal">
+          {n ? <span className="text-amber">↑ {n}개 올리기 전</span> : <span className="text-dim">모두 올라감</span>}
+        </span>
+      </div>
+      <div className="space-y-3 p-4">
+        {note ? (
+          <Row icon={<CloudOff size={13} className="text-dim" />} text={note} />
+        ) : n === 0 ? (
+          <div className="flex items-center gap-2 text-[12px] text-dim">
+            <Cloud size={14} className="text-green" /> 온라인과 같은 상태예요. 올릴 저장 지점이 없어요.
+          </div>
+        ) : (
+          <>
+            <ul className="max-h-[260px] overflow-y-auto border border-line-soft">
+              {list.map((c, i) => {
+                const together = n - 1 - i; // 이 저장 지점보다 오래된, 함께 올라갈 개수
+                const secret = c.files.some(looksSecret);
+                return (
+                  <li key={c.hash} className="flex items-center gap-2.5 border-b border-line-soft px-2.5 py-2 last:border-0">
+                    <GitCommitHorizontal size={14} className="shrink-0 text-amber" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] text-fg" title={c.subject}>{c.subject}</div>
+                      <div className="truncate font-mono text-[10px] text-dim">
+                        {c.short} · 파일 {c.files.length}개
+                        {secret && <span className="font-sans text-amber"> · 비밀 파일 포함</span>}
+                      </div>
+                    </div>
+                    {canPartial && (
+                      <button
+                        onClick={() => r.push({ upTo: c.hash })}
+                        disabled={busy}
+                        title={together > 0 ? `그 전 저장 지점 ${together}개도 함께 올라가요` : "이 저장 지점만 올려요"}
+                        className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-2 py-1 text-[11px] text-muted hover:border-teal/50 hover:text-fg disabled:opacity-40"
+                      >
+                        {r.pushing === c.hash ? <Spin /> : <CloudUpload size={12} />}
+                        {together > 0 ? `여기까지 (${together + 1})` : "올리기"}
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            <button
+              onClick={() => r.push()}
+              disabled={busy}
+              className="flex w-full items-center justify-center gap-2 rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              {r.pushing === "all" ? <Spin dark /> : <CloudUpload size={15} />}
+              {canPartial ? "모두 올리기" : "온라인에 처음 올리기"}
+              <span className="font-normal opacity-70">· {n}개</span>
+            </button>
+            <p className="text-[11px] leading-relaxed text-dim">
+              {canPartial
+                ? n > 1
+                  ? "하나씩 올릴 수도 있어요. Git 은 순서대로 쌓여서, 새 저장 지점을 올리면 그 전 것도 함께 올라가요."
+                  : "처음 올릴 때 GitHub 로그인 창이 뜰 수 있어요."
+                : `온라인에 ‘${repo.branch}’ 갈래를 새로 만들어 올리고 연결해요. 처음에는 GitHub 로그인 창이 뜰 수 있어요.`}
+            </p>
+          </>
+        )}
+        {repo.behind > 0 && (
+          <p className="text-[11px] leading-relaxed text-amber/90">
+            온라인에 아직 받지 않은 저장 지점 {repo.behind}개가 있어요. 올리기 전에 받아와야(pull) 할 수 있어요.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Spin({ dark }: { dark?: boolean }) {
+  return (
+    <span
+      className={`h-3 w-3 animate-spin rounded-full border-2 ${dark ? "border-[#0b2626]/30 border-t-[#0b2626]" : "border-line border-t-teal"}`}
+    />
   );
 }
 

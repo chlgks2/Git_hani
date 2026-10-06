@@ -1,7 +1,7 @@
 // 실제 저장소의 저장 기록 그래프 (git log)
 import { useMemo, useState } from "react";
-import { Check, Cloud, GitBranch, Tag } from "lucide-react";
-import { timeAgo, type CommitInfo } from "../git";
+import { ArrowUp, Check, Cloud, GitBranch, Tag } from "lucide-react";
+import { timeAgo, type CommitInfo, type UnpushedCommit } from "../git";
 import { layoutGraph } from "../graphLayout";
 import { GitChip } from "./Term";
 
@@ -41,8 +41,17 @@ function parseRefs(refs: string[]): Label[] {
   return out;
 }
 
-export default function RealGraph({ commits, changeCount }: { commits: CommitInfo[]; changeCount: number }) {
+export default function RealGraph({
+  commits,
+  changeCount,
+  unpushed,
+}: {
+  commits: CommitInfo[];
+  changeCount: number;
+  unpushed: UnpushedCommit[];
+}) {
   const [selected, setSelected] = useState<string | null>(null);
+  const notPushed = useMemo(() => new Set(unpushed.map((c) => c.hash)), [unpushed]);
 
   const { rows, layout } = useMemo(() => {
     const head = commits.find((c) => c.refs.some((r) => r === "HEAD" || r.startsWith("HEAD -> ")));
@@ -118,6 +127,11 @@ export default function RealGraph({ commits, changeCount }: { commits: CommitInf
                   <span className="absolute inset-y-0 left-0 w-full opacity-[0.06]" style={{ background: color(lane) }} />
                   <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: color(lane), opacity: c.wip ? 0.4 : 0.9 }} />
                   <span className="relative truncate">{c.wip ? `// ${c.subject}` : c.subject}</span>
+                  {notPushed.has(c.hash) && (
+                    <span className="relative ml-2 flex shrink-0 items-center gap-0.5 text-[10px] text-amber" title="아직 온라인에 올리지 않은 저장 지점">
+                      <ArrowUp size={10} /> 올리기 전
+                    </span>
+                  )}
                 </span>
                 <span className="w-28 truncate px-3 text-[11px] text-dim">{c.author}</span>
                 <span className="w-20 px-3 font-mono text-[11px] text-dim">{c.short}</span>

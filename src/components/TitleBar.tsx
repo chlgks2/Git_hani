@@ -34,7 +34,9 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
         <Tool icon={Undo2} label="되돌리기" git="undo" onClick={demo(() => s.openPick())} active={canRevert} />
         <Tool icon={Redo2} label="다시하기" git="redo" />
         <Tool icon={CloudDownload} label="받아오기" git="pull" />
-        <Tool icon={CloudUpload} label="올리기" git="push" onClick={demo(() => s.push())} active={canPush} badge={(!real && s.unpushed.length) || undefined} />
+        <Tool icon={CloudUpload} label="올리기" git="push" onClick={real ? () => r.push() : () => s.push()}
+          active={real ? r.unpushed.length > 0 && !r.pushing : canPush}
+          badge={(real ? r.unpushed.length : s.unpushed.length) || undefined} />
         <Tool icon={GitBranch} label="갈래" git="branch" />
         <Tool icon={Save} label="저장" git="commit" onClick={demo(() => s.commit())} active={canCommit} />
         {/* 브라우저 데모에서만 보이는 창 버튼 장식. 데스크톱 앱은 Windows 기본 창 버튼을 쓴다 */}

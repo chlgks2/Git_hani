@@ -37,6 +37,8 @@ pub struct RepoStatus {
     pub behind: u32,
     /// 아직 저장 지점이 하나도 없는 새 저장소인지
     pub no_commits: bool,
+    /// 연결된 온라인 저장소 이름들 (보통 "origin" 하나)
+    pub remotes: Vec<String>,
     pub files: Vec<FileChange>,
 }
 
@@ -53,6 +55,9 @@ where
     let mut cmd = Command::new("git");
     // 영어 메시지로 고정해서, 에러 문구를 안정적으로 알아볼 수 있게 한다
     cmd.env("LC_ALL", "C");
+    // 비밀번호를 터미널에서 묻지 않게 한다. 창이 없는 앱이라 물으면 영원히 멈춰 버린다.
+    // (GitHub 로그인은 Git Credential Manager 가 별도 창으로 처리한다)
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
     // core.quotepath=false : 한글 파일 이름을 "\355\225\234" 처럼 바꾸지 않고 그대로 출력
     cmd.args(["-c", "core.quotepath=false"]).args(args).current_dir(dir);
 
@@ -131,11 +136,9 @@ fn repo_root(path: &str) -> Result<String, String> {
         .map_err(|_| "이 폴더는 Git 저장소가 아니에요. Git 으로 관리 중인 프로젝트 폴더를 골라 주세요.".to_string())
 }
 
-/// React 에서 `invoke("git_status", { path })` 로 부르는 명령.
-/// path 는 사용자가 고른 폴더(저장소 안의 하위 폴더여도 된다).
-#[tauri::command]
-pub fn git_status(path: String) -> Result<RepoStatus, String> {
-    let root = repo_root(&path)?;
+/// 저장소 상태를 읽는다. path 는 사용자가 고른 폴더(저장소 안의 하위 폴더여도 된다).
+pub fn status(path: &str) -> Result<RepoStatus, String> {
+    let root = repo_root(path)?;
     let root_path = Path::new(&root);
 
     // -z : 파일 이름을 NUL 문자로 구분해서, 공백·특수문자가 있어도 안전하게 나눌 수 있다.
@@ -157,6 +160,7 @@ pub fn git_status(path: String) -> Result<RepoStatus, String> {
         ahead: 0,
         behind: 0,
         no_commits: false,
+        remotes: run_git(root_path, ["remote"])?.lines().map(String::from).collect(),
         files: Vec::new(),
     };
 
@@ -209,9 +213,8 @@ pub struct CommitInfo {
 }
 
 /// 저장 기록을 최신 순으로 최대 limit 개 가져온다. 모든 갈래(로컬·온라인)와 태그를 포함한다.
-#[tauri::command]
-pub fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
-    let root = repo_root(&path)?;
+pub fn history(path: &str, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
+    let root = repo_root(path)?;
     let root_path = Path::new(&root);
 
     // 저장 지점이 하나도 없는 새 저장소면 빈 목록
@@ -274,12 +277,11 @@ pub struct CommitResult {
 
 /// 고른 파일들만 저장 지점(커밋)으로 만든다.
 /// 이미 stage 돼 있던 다른 파일은 이번 커밋에 섞이지 않는다.
-#[tauri::command]
-pub fn git_commit(
-    path: String,
-    files: Vec<String>,
-    message: String,
-    description: Option<String>,
+pub fn commit(
+    path: &str,
+    files: &[String],
+    message: &str,
+    description: Option<&str>,
 ) -> Result<CommitResult, String> {
     let message = message.trim();
     if message.is_empty() {
@@ -288,7 +290,7 @@ pub fn git_commit(
     if files.is_empty() {
         return Err("저장할 파일을 하나 이상 골라 주세요.".into());
     }
-    let root = repo_root(&path)?;
+    let root = repo_root(path)?;
     let root_path = Path::new(&root);
 
     // 1) 고른 파일을 stage 한다. -A : 새 파일 추가, 수정, 삭제를 모두 반영
@@ -299,7 +301,7 @@ pub fn git_commit(
 
     // 2) 그 파일들만 커밋한다. 파일 이름을 주면 git 은 그 파일만 담는다(--only 동작).
     let mut commit: Vec<&str> = vec!["commit", "-m", message];
-    let desc = description.as_deref().map(str::trim).unwrap_or("");
+    let desc = description.map(str::trim).unwrap_or("");
     if !desc.is_empty() {
         commit.extend(["-m", desc]);
     }
@@ -326,6 +328,136 @@ fn friendly_commit_error(e: String) -> String {
     }
 }
 
+
+/* ---------- 올리기 (push) ---------- */
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnpushedCommit {
+    #[serde(flatten)]
+    pub info: CommitInfo,
+    /// 이 저장 지점에서 바뀐 파일들 (비밀 정보 파일이 섞였는지 확인용)
+    pub files: Vec<String>,
+}
+
+/// 아직 온라인에 올리지 않은 저장 지점들 (최신이 앞).
+/// 연결된 온라인 갈래가 있으면 그것과 비교하고, 없으면 어느 온라인 갈래에도 없는 것들을 모은다.
+pub fn unpushed(path: &str) -> Result<Vec<UnpushedCommit>, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if run_git(root_path, ["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let has_upstream = run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
+    let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
+    let raw = if has_upstream {
+        run_git(root_path, ["log", "--decorate=full", format, "@{u}..HEAD"])?
+    } else {
+        run_git(root_path, ["log", "--decorate=full", format, "HEAD", "--not", "--remotes"])?
+    };
+
+    parse_log(&raw)
+        .into_iter()
+        .map(|info| {
+            // --root : 맨 첫 저장 지점도 파일 목록이 나오게
+            let files = run_git(
+                root_path,
+                ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", info.hash.as_str()],
+            )?
+            .lines()
+            .map(String::from)
+            .collect();
+            Ok(UnpushedCommit { info, files })
+        })
+        .collect() // Vec<Result<..>> 를 Result<Vec<..>> 로 모은다. 하나라도 실패하면 그 에러
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushResult {
+    pub remote: String,
+    pub branch: String,
+    /// 이번에 온라인 갈래를 새로 만들었는지 (처음 올리기)
+    pub created: bool,
+}
+
+/// 저장 지점을 온라인에 올린다.
+/// up_to 가 없으면 지금 갈래 전체를, 있으면 그 저장 지점까지만 올린다.
+/// (Git 은 순서대로 쌓이므로 up_to 보다 오래된, 아직 안 올린 저장 지점도 함께 올라간다)
+pub fn push(path: &str, up_to: Option<&str>) -> Result<PushResult, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+
+    let branch = run_git(root_path, ["symbolic-ref", "--short", "-q", "HEAD"])
+        .map(|b| b.trim().to_string())
+        .map_err(|_| "지금은 갈래가 아닌 곳(특정 저장 지점)에 있어서 올릴 수 없어요. 갈래로 돌아간 뒤 올려 주세요.".to_string())?;
+
+    // 연결된 온라인 갈래 (예: "origin/main"). 없으면 처음 올리는 것
+    let upstream = run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"])
+        .ok()
+        .map(|u| u.trim().to_string());
+
+    let result = match upstream {
+        Some(up) => {
+            let (remote, remote_branch) = up
+                .split_once('/')
+                .ok_or_else(|| format!("온라인 갈래 이름({up})을 이해하지 못했어요."))?;
+            // "해시:refs/heads/main" = 이 저장 지점까지를 온라인 main 으로 올린다
+            let refspec = format!("{}:refs/heads/{remote_branch}", up_to.unwrap_or("HEAD"));
+            run_git(root_path, ["push", remote, refspec.as_str()]).map_err(friendly_push_error)?;
+            PushResult { remote: remote.to_string(), branch: remote_branch.to_string(), created: false }
+        }
+        None => {
+            if up_to.is_some() {
+                return Err("처음 올리는 갈래는 한꺼번에 올려야 해요. ‘모두 올리기’를 눌러 주세요.".into());
+            }
+            let remotes: Vec<String> = run_git(root_path, ["remote"])?.lines().map(String::from).collect();
+            // origin 이 있으면 origin, 없으면 하나뿐인 원격 저장소
+            let remote = if remotes.iter().any(|r| r == "origin") {
+                "origin".to_string()
+            } else if remotes.len() == 1 {
+                remotes[0].clone()
+            } else if remotes.is_empty() {
+                return Err("온라인 저장소(GitHub 등)와 연결되어 있지 않아요. 먼저 저장소를 연결해 주세요.".into());
+            } else {
+                return Err("온라인 저장소가 여러 개 연결돼 있어서 어디로 올릴지 정할 수 없어요.".into());
+            };
+            // -u : 올리면서 "이 갈래 ↔ 온라인 갈래" 연결도 만든다. 다음부터는 그냥 올리면 된다
+            run_git(root_path, ["push", "-u", remote.as_str(), branch.as_str()]).map_err(friendly_push_error)?;
+            PushResult { remote, branch, created: true }
+        }
+    };
+    Ok(result)
+}
+
+/// push 실패 메시지를 쉬운 말로 바꾼다.
+fn friendly_push_error(e: String) -> String {
+    let has = |k: &str| e.contains(k);
+    let msg = if has("fetch first") || has("non-fast-forward") || (has("[rejected]") && has("behind")) {
+        "온라인에 내가 아직 받지 않은 새 저장 지점이 있어서 올릴 수 없어요. 먼저 최신 내용을 받아와야(pull) 해요."
+    } else if has("GH013") || has("Push cannot contain secrets") {
+        "GitHub 이 저장 지점 안에서 비밀 정보(API 키 등)를 찾아서 올리기를 막았어요. 해당 파일을 빼고 다시 저장해야 해요."
+    } else if has("GH001") || has("Large files detected") || has("exceeds GitHub's file size limit") {
+        "100MB 가 넘는 큰 파일이 있어서 GitHub 에 올릴 수 없어요."
+    } else if has("protected branch") || has("pre-receive hook declined") {
+        "이 갈래는 보호돼 있어서 바로 올릴 수 없어요. 팀 규칙(Pull Request 등)을 확인해 주세요."
+    } else if has("Authentication failed")
+        || has("could not read Username")
+        || has("terminal prompts disabled")
+        || has("Permission denied")
+        || has("403")
+    {
+        "GitHub 로그인이 필요하거나 이 저장소에 올릴 권한이 없어요. 로그인 창이 떴다면 로그인한 뒤 다시 시도해 주세요."
+    } else if has("Could not resolve host") || has("unable to access") || has("Connection timed out") {
+        "온라인 저장소에 연결하지 못했어요. 인터넷 연결을 확인해 주세요."
+    } else if has("does not appear to be a git repository") || has("Repository not found") {
+        "온라인 저장소를 찾을 수 없어요. 저장소 주소나 접근 권한을 확인해 주세요."
+    } else {
+        return format!("올리지 못했어요.\n{e}");
+    };
+    msg.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +471,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             no_commits: false,
+            remotes: vec![],
             files: vec![],
         }
     }
@@ -363,14 +496,14 @@ mod tests {
     #[test]
     fn reads_this_repository() {
         // src-tauri 폴더에서 시작해도 저장소 맨 위(Git_hani)를 찾아야 한다
-        let st = git_status(env!("CARGO_MANIFEST_DIR").to_string()).expect("git status 실패");
+        let st = status(env!("CARGO_MANIFEST_DIR")).expect("git status 실패");
         assert_eq!(st.name, "Git_hani");
         assert!(st.branch.is_some());
     }
 
     #[test]
     fn rejects_non_repository() {
-        let err = git_status(std::env::temp_dir().to_string_lossy().into_owned()).unwrap_err();
+        let err = status(&std::env::temp_dir().to_string_lossy()).unwrap_err();
         assert!(err.contains("Git 저장소가 아니에요"));
     }
 
@@ -393,7 +526,7 @@ mod tests {
     }
 
     fn changed(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = git_status(dir.to_string_lossy().into_owned())
+        let mut v: Vec<String> = status(&dir.to_string_lossy())
             .unwrap()
             .files
             .into_iter()
@@ -411,11 +544,11 @@ mod tests {
         write(&dir, ".env", "KEY=secret");
 
         let p = dir.to_string_lossy().into_owned();
-        git_commit(p.clone(), vec!["a.txt".into(), "한글.txt".into()], "첫 저장".into(), None).unwrap();
+        commit(&p, &["a.txt".into(), "한글.txt".into()], "첫 저장", None).unwrap();
 
         // .env 는 고르지 않았으니 그대로 남아 있어야 한다
         assert_eq!(changed(&dir), vec![".env".to_string()]);
-        let log = git_log(p, None).unwrap();
+        let log = history(&p, None).unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "첫 저장");
         assert!(log[0].refs.iter().any(|r| r == "HEAD -> refs/heads/main"));
@@ -429,18 +562,18 @@ mod tests {
         write(&dir, "b.txt", "1");
         write(&dir, "c.txt", "1");
         let p = dir.to_string_lossy().into_owned();
-        git_commit(p.clone(), vec!["a.txt".into(), "b.txt".into(), "c.txt".into()], "init".into(), None).unwrap();
+        commit(&p, &["a.txt".into(), "b.txt".into(), "c.txt".into()], "init", None).unwrap();
 
         write(&dir, "a.txt", "2"); // 수정
         std::fs::remove_file(dir.join("b.txt")).unwrap(); // 삭제
         write(&dir, "c.txt", "2");
         run_git(&dir, ["add", "c.txt"]).unwrap(); // 다른 곳에서 미리 stage 해 둔 파일
 
-        git_commit(p.clone(), vec!["a.txt".into(), "b.txt".into()], "a 수정, b 삭제".into(), Some("설명".into())).unwrap();
+        commit(&p, &["a.txt".into(), "b.txt".into()], "a 수정, b 삭제", Some("설명")).unwrap();
 
         // c.txt 는 stage 돼 있었어도 이번 커밋에 들어가면 안 된다
         assert_eq!(changed(&dir), vec!["c.txt".to_string()]);
-        let log = git_log(p, None).unwrap();
+        let log = history(&p, None).unwrap();
         assert_eq!(log[0].subject, "a 수정, b 삭제");
         assert_eq!(log[0].parents, vec![log[1].hash.clone()]);
         std::fs::remove_dir_all(dir).ok();
@@ -450,15 +583,15 @@ mod tests {
     fn commit_needs_message_and_files() {
         let dir = temp_repo("empty");
         let p = dir.to_string_lossy().into_owned();
-        assert!(git_commit(p.clone(), vec!["a".into()], "  ".into(), None).is_err());
-        assert!(git_commit(p, vec![], "msg".into(), None).is_err());
+        assert!(commit(&p, &["a".into()], "  ", None).is_err());
+        assert!(commit(&p, &[], "msg", None).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn log_of_new_repo_is_empty() {
         let dir = temp_repo("nolog");
-        assert!(git_log(dir.to_string_lossy().into_owned(), None).unwrap().is_empty());
+        assert!(history(&dir.to_string_lossy(), None).unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -471,6 +604,92 @@ mod tests {
         assert_eq!(v[0].parents, vec!["p1", "p0"]);
         assert_eq!(v[0].refs, vec!["HEAD -> main", "origin/main", "tag: v1"]);
         assert!(v[1].parents.is_empty() && v[1].refs.is_empty());
+    }
+
+    /// 온라인 저장소 역할을 할 bare 저장소와, 그것에 연결된 작업 저장소를 만든다
+    fn repo_with_remote(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let work = temp_repo(tag);
+        let bare = work.with_extension("remote.git");
+        run_git(&work, ["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]).unwrap();
+        run_git(&work, ["remote", "add", "origin", bare.to_str().unwrap()]).unwrap();
+        (work, bare)
+    }
+
+    fn save(dir: &Path, name: &str, msg: &str) {
+        write(dir, name, msg);
+        commit(&dir.to_string_lossy(), &[name.to_string()], msg, None).unwrap();
+    }
+
+    #[test]
+    fn first_push_creates_remote_branch() {
+        let (work, bare) = repo_with_remote("push-first");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "첫 저장");
+        assert_eq!(unpushed(&p).unwrap().len(), 1);
+
+        let r = push(&p, None).unwrap();
+        assert!(r.created);
+        assert_eq!((r.remote.as_str(), r.branch.as_str()), ("origin", "main"));
+        let st = status(&p).unwrap();
+        assert_eq!(st.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(st.ahead, 0);
+        assert!(unpushed(&p).unwrap().is_empty());
+        std::fs::remove_dir_all(work).ok();
+        std::fs::remove_dir_all(bare).ok();
+    }
+
+    #[test]
+    fn push_up_to_a_commit() {
+        let (work, bare) = repo_with_remote("push-partial");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "1");
+        push(&p, None).unwrap();
+        save(&work, "b.txt", "2");
+        save(&work, ".env", "3");
+
+        let list = unpushed(&p).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].files, vec![".env".to_string()]); // 최신이 앞
+        let older = list[1].info.hash.clone();
+
+        push(&p, Some(&older)).unwrap(); // 오래된 것 하나만
+        let left = unpushed(&p).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].info.subject, "3");
+        std::fs::remove_dir_all(work).ok();
+        std::fs::remove_dir_all(bare).ok();
+    }
+
+    #[test]
+    fn push_rejected_when_remote_has_new_commits() {
+        let (work, bare) = repo_with_remote("push-reject");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "1");
+        push(&p, None).unwrap();
+
+        // 다른 사람이 먼저 올린 상황
+        let other = work.with_extension("other");
+        run_git(&work, ["clone", "-q", bare.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
+        run_git(&other, ["config", "user.name", "other"]).unwrap();
+        run_git(&other, ["config", "user.email", "other@example.com"]).unwrap();
+        save(&other, "b.txt", "다른 사람");
+        run_git(&other, ["push", "-q"]).unwrap();
+
+        save(&work, "c.txt", "내 저장");
+        let err = push(&p, None).unwrap_err();
+        assert!(err.contains("받아와야"), "{err}");
+        for d in [work, bare, other] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn push_without_remote_explains() {
+        let dir = temp_repo("push-noremote");
+        let p = dir.to_string_lossy().into_owned();
+        save(&dir, "a.txt", "1");
+        assert!(push(&p, None).unwrap_err().contains("연결되어 있지 않아요"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

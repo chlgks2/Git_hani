@@ -40,7 +40,7 @@ pub async fn git_commit(
 }
 
 #[tauri::command]
-pub async fn git_unpushed(path: String) -> Result<Vec<git::UnpushedCommit>, String> {
+pub async fn git_unpushed(path: String) -> Result<Vec<git::CommitWithFiles>, String> {
     blocking(move || git::unpushed(&path)).await
 }
 
@@ -52,4 +52,20 @@ pub async fn git_push(path: String, up_to: Option<String>) -> Result<git::PushRe
 #[tauri::command]
 pub async fn git_commit_stats(path: String, hash: String) -> Result<Vec<git::FileStat>, String> {
     blocking(move || git::commit_stats(&path, &hash)).await
+}
+
+/// interactive: 사용자가 직접 누른 확인이면 true (필요하면 로그인 창을 띄움), 자동 확인이면 false
+#[tauri::command]
+pub async fn git_fetch(path: String, interactive: bool) -> Result<(), String> {
+    blocking(move || git::fetch(&path, interactive)).await
+}
+
+#[tauri::command]
+pub async fn git_incoming(path: String) -> Result<Vec<git::CommitWithFiles>, String> {
+    blocking(move || git::incoming(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_pull(path: String) -> Result<git::PullResult, String> {
+    blocking(move || git::pull(&path)).await
 }

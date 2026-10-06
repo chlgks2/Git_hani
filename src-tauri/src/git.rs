@@ -52,7 +52,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_git_env(dir, args, &[])
+}
+
+/// run_git 과 같지만 환경 변수를 더 지정할 수 있다 (예: 로그인 창을 띄우지 않기)
+fn run_git_env<I, S>(dir: &Path, args: I, envs: &[(&str, &str)]) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut cmd = Command::new("git");
+    cmd.envs(envs.iter().copied());
     // 영어 메시지로 고정해서, 에러 문구를 안정적으로 알아볼 수 있게 한다
     cmd.env("LC_ALL", "C");
     // 비밀번호를 터미널에서 묻지 않게 한다. 창이 없는 앱이라 물으면 영원히 멈춰 버린다.
@@ -331,31 +341,21 @@ fn friendly_commit_error(e: String) -> String {
 
 /* ---------- 올리기 (push) ---------- */
 
+/// 저장 지점 정보 + 그 저장 지점에서 바뀐 파일 이름들
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UnpushedCommit {
+pub struct CommitWithFiles {
+    /// flatten : JSON 으로 보낼 때 info 안의 칸들을 한 단계 위로 펼친다 ({hash, subject, ..., files})
     #[serde(flatten)]
     pub info: CommitInfo,
-    /// 이 저장 지점에서 바뀐 파일들 (비밀 정보 파일이 섞였는지 확인용)
     pub files: Vec<String>,
 }
 
-/// 아직 온라인에 올리지 않은 저장 지점들 (최신이 앞).
-/// 연결된 온라인 갈래가 있으면 그것과 비교하고, 없으면 어느 온라인 갈래에도 없는 것들을 모은다.
-pub fn unpushed(path: &str) -> Result<Vec<UnpushedCommit>, String> {
-    let root = repo_root(path)?;
-    let root_path = Path::new(&root);
-    if run_git(root_path, ["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
-        return Ok(Vec::new());
-    }
-    let has_upstream = run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
-    let format = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
-    let raw = if has_upstream {
-        run_git(root_path, ["log", "--decorate=full", format, "@{u}..HEAD"])?
-    } else {
-        run_git(root_path, ["log", "--decorate=full", format, "HEAD", "--not", "--remotes"])?
-    };
-
+/// git log 범위(예: "@{u}..HEAD")의 저장 지점들을 바뀐 파일 목록과 함께 가져온다 (최신이 앞)
+fn commits_with_files(root_path: &Path, range: &[&str]) -> Result<Vec<CommitWithFiles>, String> {
+    let mut args = vec!["log", "--decorate=full", "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e"];
+    args.extend_from_slice(range);
+    let raw = run_git(root_path, args)?;
     parse_log(&raw)
         .into_iter()
         .map(|info| {
@@ -367,9 +367,28 @@ pub fn unpushed(path: &str) -> Result<Vec<UnpushedCommit>, String> {
             .lines()
             .map(String::from)
             .collect();
-            Ok(UnpushedCommit { info, files })
+            Ok(CommitWithFiles { info, files })
         })
         .collect() // Vec<Result<..>> 를 Result<Vec<..>> 로 모은다. 하나라도 실패하면 그 에러
+}
+
+/// 아직 온라인에 올리지 않은 저장 지점들 (최신이 앞).
+/// 연결된 온라인 갈래가 있으면 그것과 비교하고, 없으면 어느 온라인 갈래에도 없는 것들을 모은다.
+pub fn unpushed(path: &str) -> Result<Vec<CommitWithFiles>, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if run_git(root_path, ["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    if has_upstream(root_path) {
+        commits_with_files(root_path, &["@{u}..HEAD"])
+    } else {
+        commits_with_files(root_path, &["HEAD", "--not", "--remotes"])
+    }
+}
+
+fn has_upstream(root_path: &Path) -> bool {
+    run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"]).is_ok()
 }
 
 #[derive(Debug, Serialize)]
@@ -434,7 +453,7 @@ pub fn push(path: &str, up_to: Option<&str>) -> Result<PushResult, String> {
 fn friendly_push_error(e: String) -> String {
     let has = |k: &str| e.contains(k);
     let msg = if has("fetch first") || has("non-fast-forward") || (has("[rejected]") && has("behind")) {
-        "온라인에 내가 아직 받지 않은 새 저장 지점이 있어서 올릴 수 없어요. 먼저 최신 내용을 받아와야(pull) 해요."
+        "온라인에 내가 아직 받지 않은 새 저장 지점이 있어서 올릴 수 없어요. 먼저 ‘받아오기’로 최신 내용을 받아와야 해요."
     } else if has("GH013") || has("Push cannot contain secrets") {
         "GitHub 이 저장 지점 안에서 비밀 정보(API 키 등)를 찾아서 올리기를 막았어요. 해당 파일을 빼고 다시 저장해야 해요."
     } else if has("GH001") || has("Large files detected") || has("exceeds GitHub's file size limit") {
@@ -456,6 +475,110 @@ fn friendly_push_error(e: String) -> String {
         return format!("올리지 못했어요.\n{e}");
     };
     msg.to_string()
+}
+
+/* ---------- 받아오기 (fetch / pull) ---------- */
+
+/// 온라인 저장소의 최신 기록을 내려받기만 한다 (내 파일은 건드리지 않음).
+/// interactive 가 false 면 로그인 창을 띄우지 않는다 — 자동 확인용. 로그인이 필요하면 조용히 실패한다.
+pub fn fetch(path: &str, interactive: bool) -> Result<(), String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if run_git(root_path, ["remote"])?.trim().is_empty() {
+        return Ok(()); // 연결된 온라인 저장소가 없으면 할 일이 없다
+    }
+    let envs: &[(&str, &str)] = if interactive { &[] } else { &[("GCM_INTERACTIVE", "never")] };
+    // --prune : 온라인에서 지워진 갈래는 내 쪽 목록에서도 지운다
+    run_git_env(root_path, ["fetch", "--prune", "--quiet"], envs).map_err(friendly_push_error)?;
+    Ok(())
+}
+
+/// 온라인에는 있지만 아직 받지 않은 저장 지점들 (최신이 앞). 마지막 fetch 기준.
+pub fn incoming(path: &str) -> Result<Vec<CommitWithFiles>, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if !has_upstream(root_path) {
+        return Ok(Vec::new());
+    }
+    commits_with_files(root_path, &["HEAD..@{u}"])
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullResult {
+    /// "upToDate" 이미 최신 / "fastForward" 그대로 받음 / "merged" 합침 / "conflict" 충돌로 취소
+    pub kind: String,
+    /// 받아온 저장 지점 수
+    pub count: u32,
+    /// 충돌 난 파일들 (kind 가 "conflict" 일 때)
+    pub conflicts: Vec<String>,
+}
+
+fn count(root_path: &Path, range: &str) -> Result<u32, String> {
+    Ok(run_git(root_path, ["rev-list", "--count", range])?.trim().parse().unwrap_or(0))
+}
+
+/// 온라인의 최신 내용을 받아와 내 갈래에 반영한다.
+/// 충돌이 나면 받아오기를 취소하고 원래 상태로 되돌린다 — 저장소를 어중간한 상태로 두지 않는다.
+pub fn pull(path: &str) -> Result<PullResult, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+
+    run_git(root_path, ["symbolic-ref", "--short", "-q", "HEAD"])
+        .map_err(|_| "지금은 갈래가 아닌 곳(특정 저장 지점)에 있어서 받아올 수 없어요.".to_string())?;
+    if !has_upstream(root_path) {
+        return Err("이 갈래는 온라인 갈래와 연결되어 있지 않아서 받아올 곳이 없어요. 먼저 ‘올리기’로 연결해 주세요.".into());
+    }
+
+    fetch(&root, true)?;
+
+    let incoming = count(root_path, "HEAD..@{u}")?;
+    if incoming == 0 {
+        return Ok(PullResult { kind: "upToDate".into(), count: 0, conflicts: vec![] });
+    }
+    let local_ahead = count(root_path, "@{u}..HEAD")?;
+
+    if local_ahead == 0 {
+        // 내 쪽에 새 저장 지점이 없으면 온라인 것을 그대로 따라간다 (가장 안전한 경우)
+        run_git(root_path, ["merge", "--ff-only", "@{u}"]).map_err(friendly_pull_error)?;
+        return Ok(PullResult { kind: "fastForward".into(), count: incoming, conflicts: vec![] });
+    }
+
+    // 양쪽 모두 새 저장 지점이 있으면 합친다
+    match run_git(root_path, ["merge", "--no-edit", "@{u}"]) {
+        Ok(_) => Ok(PullResult { kind: "merged".into(), count: incoming, conflicts: vec![] }),
+        Err(e) => {
+            // 충돌 난 파일 목록 (--diff-filter=U : 합치지 못한 파일)
+            let conflicts: Vec<String> = run_git(root_path, ["diff", "--name-only", "--diff-filter=U"])
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect();
+            if conflicts.is_empty() {
+                // 충돌이 아니라 시작 전에 멈춘 경우(저장 안 한 변경과 겹침 등). git 이 아무것도 바꾸지 않았다
+                return Err(friendly_pull_error(e));
+            }
+            // 합치다 만 상태를 취소하고 받아오기 전으로 되돌린다
+            run_git(root_path, ["merge", "--abort"])
+                .map_err(|e| format!("충돌이 나서 되돌리려 했지만 실패했어요.\n{e}"))?;
+            Ok(PullResult { kind: "conflict".into(), count: incoming, conflicts })
+        }
+    }
+}
+
+fn friendly_pull_error(e: String) -> String {
+    if e.contains("would be overwritten") {
+        // git 이 알려준 겹치는 파일 이름들 (탭으로 시작하는 줄)
+        let files: Vec<&str> = e.lines().filter(|l| l.starts_with('\t')).map(str::trim).collect();
+        let list = if files.is_empty() { String::new() } else { format!("\n{}", files.join("\n")) };
+        format!(
+            "저장하지 않은 내 변경이 있는 파일을 온라인에서도 바꿨어요. 먼저 커밋한 뒤 다시 받아와 주세요. (아무것도 바뀌지 않았어요){list}"
+        )
+    } else if e.contains("Please tell me who you are") {
+        friendly_commit_error(e)
+    } else {
+        format!("받아오지 못했어요.\n{e}")
+    }
 }
 
 /* ---------- 저장 지점 하나의 변경 요약 ---------- */
@@ -759,6 +882,116 @@ mod tests {
         let v = parse_numstat("-\t-\tlogo.png\n3\t0\tREADME.md\n");
         assert_eq!(v[0].added, None);
         assert_eq!(v[1].added, Some(3));
+    }
+
+    /// 같은 온라인 저장소에 연결된 두 번째 작업 저장소 (팀원 역할)
+    fn teammate(work: &Path, bare: &Path) -> std::path::PathBuf {
+        let other = work.with_extension("mate");
+        run_git(work, ["clone", "-q", bare.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
+        run_git(&other, ["config", "user.name", "mate"]).unwrap();
+        run_git(&other, ["config", "user.email", "mate@example.com"]).unwrap();
+        other
+    }
+
+    fn cleanup(dirs: &[&Path]) {
+        for d in dirs {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    fn merging(dir: &Path) -> bool {
+        dir.join(".git").join("MERGE_HEAD").exists()
+    }
+
+    #[test]
+    fn pull_fast_forward_and_up_to_date() {
+        let (work, bare) = repo_with_remote("pull-ff");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "1");
+        push(&p, None).unwrap();
+        let mate = teammate(&work, &bare);
+        save(&mate, "b.txt", "팀원 작업");
+        run_git(&mate, ["push", "-q"]).unwrap();
+
+        fetch(&p, false).unwrap();
+        let inc = incoming(&p).unwrap();
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0].info.author, "mate");
+
+        let r = pull(&p).unwrap();
+        assert_eq!((r.kind.as_str(), r.count), ("fastForward", 1));
+        assert!(work.join("b.txt").exists());
+        assert_eq!(pull(&p).unwrap().kind, "upToDate");
+        cleanup(&[&work, &bare, &mate]);
+    }
+
+    #[test]
+    fn pull_merges_when_both_sides_changed() {
+        let (work, bare) = repo_with_remote("pull-merge");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "1");
+        push(&p, None).unwrap();
+        let mate = teammate(&work, &bare);
+        save(&mate, "b.txt", "팀원");
+        run_git(&mate, ["push", "-q"]).unwrap();
+        save(&work, "c.txt", "나");
+
+        let r = pull(&p).unwrap();
+        assert_eq!(r.kind, "merged");
+        assert!(work.join("b.txt").exists() && work.join("c.txt").exists());
+        // 이제 올릴 수 있어야 한다 (내 저장 지점 + 합친 저장 지점)
+        assert_eq!(unpushed(&p).unwrap().len(), 2);
+        push(&p, None).unwrap();
+        cleanup(&[&work, &bare, &mate]);
+    }
+
+    #[test]
+    fn pull_conflict_is_rolled_back() {
+        let (work, bare) = repo_with_remote("pull-conflict");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "처음");
+        push(&p, None).unwrap();
+        let mate = teammate(&work, &bare);
+        save(&mate, "a.txt", "팀원이 바꾼 줄");
+        run_git(&mate, ["push", "-q"]).unwrap();
+        save(&work, "a.txt", "내가 바꾼 줄");
+        let before = run_git(&work, ["rev-parse", "HEAD"]).unwrap();
+
+        let r = pull(&p).unwrap();
+        assert_eq!(r.kind, "conflict");
+        assert_eq!(r.conflicts, vec!["a.txt".to_string()]);
+        // 원래 상태 그대로: 합치는 중이 아니고, 저장 지점·파일 내용도 그대로
+        assert!(!merging(&work));
+        assert_eq!(run_git(&work, ["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "내가 바꾼 줄");
+        cleanup(&[&work, &bare, &mate]);
+    }
+
+    #[test]
+    fn pull_stops_when_uncommitted_changes_overlap() {
+        let (work, bare) = repo_with_remote("pull-dirty");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "처음");
+        push(&p, None).unwrap();
+        let mate = teammate(&work, &bare);
+        save(&mate, "a.txt", "팀원");
+        run_git(&mate, ["push", "-q"]).unwrap();
+        write(&work, "a.txt", "저장 안 한 내 변경");
+
+        let err = pull(&p).unwrap_err();
+        assert!(err.contains("먼저 커밋"), "{err}");
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "저장 안 한 내 변경");
+        cleanup(&[&work, &bare, &mate]);
+    }
+
+    #[test]
+    fn pull_without_upstream_explains() {
+        let (work, bare) = repo_with_remote("pull-noup");
+        let p = work.to_string_lossy().into_owned();
+        save(&work, "a.txt", "1");
+        assert!(pull(&p).unwrap_err().contains("연결되어 있지 않아서"));
+        cleanup(&[&work, &bare]);
     }
 
     #[test]

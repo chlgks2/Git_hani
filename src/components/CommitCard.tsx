@@ -1,5 +1,5 @@
 // 그래프의 점에 마우스를 올리면 뜨는 요약 카드
-import { ArrowUp, FileText, GitMerge, MapPin, Sparkles } from "lucide-react";
+import { ArrowDown, ArrowUp, FileText, GitMerge, MapPin, Sparkles } from "lucide-react";
 import type { FileStat } from "../git";
 
 export interface CardData {
@@ -11,6 +11,7 @@ export interface CardData {
   events: string[];
   position?: string;
   unpushed?: boolean;
+  incoming?: boolean;
   /** undefined: 표시 안 함, "loading": 불러오는 중 */
   stats?: FileStat[] | "loading";
   /** 저장 안 된 변경 줄처럼 줄 수 없이 파일 이름만 보여줄 때 */
@@ -38,7 +39,7 @@ export default function CommitCard({ d, x, y, above }: { d: CardData; x: number;
         <div className="mt-1 text-[13px] leading-snug font-medium text-fg">{d.subject}</div>
       </div>
 
-      {(d.events.length > 0 || d.position || d.unpushed) && (
+      {(d.events.length > 0 || d.position || d.unpushed || d.incoming) && (
         <ul className="space-y-1 border-t border-line-soft px-3 py-2 text-[12px] leading-snug">
           {d.events.map((e) => (
             <li key={e} className="flex gap-1.5 text-fg/90">
@@ -60,6 +61,12 @@ export default function CommitCard({ d, x, y, above }: { d: CardData; x: number;
             <li className="flex gap-1.5 text-amber">
               <ArrowUp size={12} className="mt-0.5 shrink-0" />
               아직 온라인에 올리지 않았어요
+            </li>
+          )}
+          {d.incoming && (
+            <li className="flex gap-1.5 text-blue">
+              <ArrowDown size={12} className="mt-0.5 shrink-0" />
+              온라인에만 있고 아직 받아오지 않았어요
             </li>
           )}
         </ul>

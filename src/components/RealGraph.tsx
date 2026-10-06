@@ -1,6 +1,6 @@
 // 실제 저장소의 저장 기록 그래프 (git log)
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUp, Check, Cloud, GitBranch, Tag } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Cloud, GitBranch, Tag } from "lucide-react";
 import { gitCommitStats, timeAgo, type CommitInfo, type FileStat, type UnpushedCommit } from "../git";
 import { buildInsights } from "../graphInsights";
 import { layoutGraph } from "../graphLayout";
@@ -48,18 +48,22 @@ export default function RealGraph({
   commits,
   fileNames,
   unpushed,
+  incoming,
 }: {
   root: string;
   commits: CommitInfo[];
   /** 아직 저장하지 않은 파일들 */
   fileNames: string[];
   unpushed: UnpushedCommit[];
+  /** 온라인에만 있고 아직 받지 않은 저장 지점들 */
+  incoming: UnpushedCommit[];
 }) {
   const changeCount = fileNames.length;
   const [selected, setSelected] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [stats, setStats] = useState<Map<string, FileStat[]>>(new Map());
   const notPushed = useMemo(() => new Set(unpushed.map((c) => c.hash)), [unpushed]);
+  const notPulled = useMemo(() => new Set(incoming.map((c) => c.hash)), [incoming]);
 
   const { rows, layout } = useMemo(() => {
     const head = commits.find((c) => c.refs.some((r) => r === "HEAD" || r.startsWith("HEAD -> ")));
@@ -170,6 +174,11 @@ export default function RealGraph({
                       <ArrowUp size={10} /> 올리기 전
                     </span>
                   )}
+                  {notPulled.has(c.hash) && (
+                    <span className="relative ml-2 flex shrink-0 items-center gap-0.5 text-[10px] text-blue" title="온라인에만 있고 아직 받지 않은 저장 지점">
+                      <ArrowDown size={10} /> 받아오기 전
+                    </span>
+                  )}
                 </span>
                 <span className="w-28 truncate px-3 text-[11px] text-dim">{c.author}</span>
                 <span className="w-20 px-3 font-mono text-[11px] text-dim">{c.short}</span>
@@ -262,6 +271,7 @@ export default function RealGraph({
           events: ins?.events ?? [],
           position: ins?.position,
           unpushed: notPushed.has(c.hash),
+          incoming: notPulled.has(c.hash),
           stats: stats.get(c.hash) ?? "loading",
         };
     // 아래쪽 점은 카드를 위로 띄워 잘리지 않게

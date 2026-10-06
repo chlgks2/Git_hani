@@ -1,17 +1,22 @@
 // 실제 저장소 모드: 사용자가 고른 폴더의 상태·저장 기록을 보여주고, 고른 파일을 커밋한다.
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Cloud, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, KeyRound, RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, RefreshCw } from "lucide-react";
 import {
   gitCommit,
+  gitFetch,
+  gitIncoming,
   gitLog,
+  gitPull,
   gitPush,
   gitStatus,
   gitUnpushed,
   looksSecret,
   pickFolder,
+  timeAgo,
   STATUS_LABEL,
   STATUS_TONE,
   type CommitInfo,
+  type CommitWithFiles,
   type FileChange,
   type RepoStatus,
   type UnpushedCommit,
@@ -39,6 +44,11 @@ export function useRealRepo() {
   const [unpushed, setUnpushed] = useState<UnpushedCommit[]>([]);
   const [pushing, setPushing] = useState<string | null>(null); // 올리는 중인 대상 (해시 또는 "all")
   const [secretAsk, setSecretAsk] = useState<SecretAsk | null>(null);
+  const [incoming, setIncoming] = useState<CommitWithFiles[]>([]);
+  const [pulling, setPulling] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [lastCheck, setLastCheck] = useState<number | null>(null); // 마지막으로 온라인을 확인한 시각(초)
+  const [conflict, setConflict] = useState<string[] | null>(null); // 마지막 받아오기에서 충돌 난 파일
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -52,10 +62,11 @@ export function useRealRepo() {
 
   /** 상태와 기록을 다시 읽어 화면에 반영한다 */
   const fetchAll = async (path: string) => {
-    const [st, list, ahead] = await Promise.all([
+    const [st, list, ahead, behind] = await Promise.all([
       gitStatus(path),
       gitLog(path),
       gitUnpushed(path).catch(() => [] as UnpushedCommit[]),
+      gitIncoming(path).catch(() => [] as CommitWithFiles[]),
     ]);
     pathRef.current = st.root;
     // 체크 상태 유지: 이미 있던 파일은 그대로, 새로 나타난 파일은 체크 (비밀 정보로 보이면 체크 안 함)
@@ -69,6 +80,7 @@ export function useRealRepo() {
     setRepo(st);
     setCommits(list);
     setUnpushed(ahead);
+    setIncoming(behind);
     return st;
   };
 
@@ -90,7 +102,84 @@ export function useRealRepo() {
     seen.current = new Set();
     setMessage("");
     setDescription("");
+    setConflict(null);
+    setLastCheck(null);
     await load(path, "저장소 열기");
+    void quietCheck();
+  };
+
+  /**
+   * 온라인에 새 저장 지점이 있는지 조용히 확인한다 (로그인 창 없이).
+   * 저장소를 열 때와 창으로 돌아올 때 부른다. 너무 자주 묻지 않게 30초 간격을 둔다.
+   */
+  const lastQuiet = useRef(0);
+  const quietCheck = async () => {
+    const path = pathRef.current;
+    if (!path || Date.now() - lastQuiet.current < 30_000) return;
+    lastQuiet.current = Date.now();
+    try {
+      await gitFetch(path, false);
+      setLastCheck(Date.now() / 1000);
+      await fetchAll(path);
+    } catch {
+      // 로그인이 필요하거나 오프라인이면 조용히 넘어간다. 사용자가 직접 확인하면 그때 안내한다
+    }
+  };
+
+  /** 사용자가 직접 누른 확인: 필요하면 로그인 창을 띄우고, 결과를 작업 기록에 남긴다 */
+  const checkNow = async () => {
+    if (!repo || checking) return;
+    setChecking(true);
+    try {
+      await gitFetch(repo.root, true);
+      setLastCheck(Date.now() / 1000);
+      const st = await fetchAll(repo.root);
+      const n = await gitIncoming(st.root).then((l) => l.length).catch(() => 0);
+      addBlock({
+        title: "온라인 확인",
+        git: "git fetch",
+        lines: [n ? { tone: "warn", text: `온라인에 아직 받지 않은 저장 지점 ${n}개가 있어요` } : { tone: "ok", text: "온라인에 새 저장 지점이 없어요" }],
+      });
+    } catch (e) {
+      addBlock({ title: "온라인 확인", git: "git fetch", lines: [{ tone: "err", text: String(e) }] });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  /** 온라인의 최신 내용을 받아온다. 충돌이 나면 Rust 쪽에서 자동으로 취소하고 원래대로 되돌린다 */
+  const pull = async () => {
+    if (!repo || pulling) return;
+    setPulling(true);
+    setConflict(null);
+    const upstream = repo.upstream ?? "";
+    try {
+      const res = await gitPull(repo.root);
+      setLastCheck(Date.now() / 1000);
+      const lines: Block["lines"] = [];
+      if (res.kind === "upToDate") lines.push({ tone: "ok", text: "이미 최신이에요. 받아올 저장 지점이 없어요" });
+      if (res.kind === "fastForward") lines.push({ tone: "ok", text: `온라인(${upstream})의 저장 지점 ${res.count}개를 받아왔어요` });
+      if (res.kind === "merged") {
+        lines.push({ tone: "ok", text: `온라인의 저장 지점 ${res.count}개를 받아와 내 저장 지점과 합쳤어요` });
+        lines.push({ tone: "dim", text: "합친 결과는 아직 온라인에 없어요. ‘올리기’로 올려 주세요" });
+      }
+      if (res.kind === "conflict") {
+        setConflict(res.conflicts);
+        lines.push({ tone: "warn", text: "같은 부분을 서로 다르게 고쳐서 자동으로 합칠 수 없었어요" });
+        lines.push({ tone: "ok", text: "받아오기를 취소하고 원래 상태로 되돌려 놨어요. 내 파일은 그대로예요" });
+        for (const f of res.conflicts) lines.push({ tone: "dim", text: `  충돌  ${f}` });
+      }
+      addBlock({
+        title: res.kind === "conflict" ? "받아오기 (취소됨)" : "받아오기",
+        git: res.kind === "fastForward" ? "git pull --ff-only" : "git pull",
+        lines,
+      });
+      await fetchAll(repo.root);
+    } catch (e) {
+      addBlock({ title: "받아오기", git: "git pull", lines: [{ tone: "err", text: String(e) }] });
+    } finally {
+      setPulling(false);
+    }
   };
   const refresh = () => pathRef.current && load(pathRef.current, "지금 상태 확인");
   const close = () => {
@@ -99,6 +188,8 @@ export function useRealRepo() {
     setRepo(null);
     setCommits([]);
     setUnpushed([]);
+    setIncoming([]);
+    setConflict(null);
     setLog([]);
   };
 
@@ -219,7 +310,9 @@ export function useRealRepo() {
   // 다른 프로그램(AI 코딩 도구 등)에서 파일을 바꾸고 돌아오면 자동으로 다시 읽는다
   useEffect(() => {
     const onFocus = () => {
-      if (pathRef.current) fetchAll(pathRef.current).catch(() => {});
+      if (!pathRef.current) return;
+      fetchAll(pathRef.current).catch(() => {});
+      void quietCheck();
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -228,8 +321,10 @@ export function useRealRepo() {
 
   return {
     repo, commits, loading, log, checked, message, setMessage, description, setDescription, committing, secretAsk,
-    unpushed, pushing,
-    open, refresh, close, toggle, toggleAll, commit, push, cancelSecret: () => setSecretAsk(null),
+    unpushed, pushing, incoming, pulling, checking, lastCheck, conflict,
+    open, refresh, close, toggle, toggleAll, commit, push, pull, checkNow,
+    cancelSecret: () => setSecretAsk(null),
+    dismissConflict: () => setConflict(null),
   };
 }
 
@@ -300,7 +395,13 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
 
   return (
     <>
-      <RealGraph root={repo.root} commits={r.commits} fileNames={repo.files.map((f) => f.path)} unpushed={r.unpushed} />
+      <RealGraph
+        root={repo.root}
+        commits={r.commits}
+        fileNames={repo.files.map((f) => f.path)}
+        unpushed={r.unpushed}
+        incoming={r.incoming}
+      />
       {splitter}
       <section className="flex shrink-0 flex-col bg-panel" style={{ height: termH }}>
         <div className="flex h-8 shrink-0 items-center border-b border-line-soft px-3 text-[12px] text-fg">
@@ -408,6 +509,7 @@ export function RealInspector({ r }: { r: RealRepo }) {
           </div>
         )}
 
+        <PullPanel r={r} />
         <PushPanel r={r} />
       </aside>
 
@@ -495,6 +597,104 @@ function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
   );
 }
 
+/* ---------- 받아오기 (pull) ---------- */
+
+function PullPanel({ r }: { r: RealRepo }) {
+  const repo = r.repo!;
+  const list = r.incoming; // 최신이 앞
+  const n = list.length;
+
+  let note: string | null = null;
+  if (!repo.remotes.length) note = "온라인 저장소(GitHub 등)와 연결되어 있지 않아요.";
+  else if (!repo.upstream) note = "이 갈래는 아직 온라인 갈래와 연결되지 않았어요. 처음 올리면 연결돼요.";
+
+  return (
+    <div className="border-t border-line-soft">
+      <div className="flex h-8 items-center gap-2 border-b border-line-soft px-4 text-[11px] font-medium tracking-wide text-muted">
+        받아오기 <GitChip term="pull" />
+        <span className="ml-auto text-[11px] font-normal">
+          {n ? <span className="text-blue">↓ {n}개 새로 있음</span> : <span className="text-dim">최신</span>}
+        </span>
+      </div>
+      <div className="space-y-3 p-4">
+        {r.conflict && (
+          <div className="rise space-y-2 border border-amber/40 bg-amber/5 p-3 text-[12px] leading-relaxed">
+            <div className="flex items-center gap-1.5 font-medium text-amber">
+              <GitMerge size={13} /> 자동으로 합칠 수 없었어요
+            </div>
+            <p className="text-muted">
+              나와 온라인이 같은 부분을 서로 다르게 고쳤어요. <span className="text-fg">받아오기를 취소하고 원래 상태로 되돌려 놨어요.</span>{" "}
+              내 파일은 그대로예요.
+            </p>
+            <ul className="font-mono text-[11px] text-fg">
+              {r.conflict.map((f) => (
+                <li key={f}>· {f}</li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-dim">두 내용 중 무엇을 쓸지 고르는 충돌 해결 화면은 다음 단계에서 연결돼요.</p>
+            <button onClick={r.dismissConflict} className="text-[11px] text-dim hover:text-muted">
+              닫기
+            </button>
+          </div>
+        )}
+
+        {note ? (
+          <Row icon={<CloudOff size={13} className="text-dim" />} text={note} />
+        ) : (
+          <>
+            {n > 0 ? (
+              <ul className="max-h-[220px] overflow-y-auto border border-line-soft">
+                {list.map((c) => (
+                  <li key={c.hash} className="flex items-center gap-2.5 border-b border-line-soft px-2.5 py-2 last:border-0">
+                    <ArrowDown size={13} className="shrink-0 text-blue" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] text-fg" title={c.subject}>{c.subject}</div>
+                      <div className="truncate text-[10px] text-dim">
+                        {c.author} · {timeAgo(c.time)} · 파일 {c.files.length}개
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="flex items-center gap-2 text-[12px] text-dim">
+                <Cloud size={14} className="text-green" /> 온라인에 새 저장 지점이 없어요
+              </div>
+            )}
+
+            {n > 0 && (
+              <button
+                onClick={r.pull}
+                disabled={r.pulling}
+                className="flex w-full items-center justify-center gap-2 rounded-[3px] bg-blue px-3 py-2 text-[13px] font-semibold text-[#081a33] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                {r.pulling ? <Spin dark /> : <CloudDownload size={15} />}
+                받아오기 <span className="font-normal opacity-70">· {n}개</span>
+              </button>
+            )}
+            {n > 0 && repo.files.length > 0 && (
+              <p className="text-[11px] leading-relaxed text-dim">
+                저장하지 않은 변경이 있어요. 온라인에서도 같은 파일을 바꿨다면 받아오기가 멈추니, 먼저 커밋하는 게 좋아요.
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 text-[11px] text-dim">
+              <button
+                onClick={r.checkNow}
+                disabled={r.checking}
+                className="flex items-center gap-1 rounded-[3px] border border-line px-2 py-0.5 text-muted hover:border-teal/50 hover:text-fg disabled:opacity-40"
+              >
+                <RefreshCw size={10} className={r.checking ? "animate-spin" : ""} /> 지금 온라인 확인
+              </button>
+              {r.lastCheck ? `마지막 확인 ${timeAgo(r.lastCheck)}` : "아직 확인하지 않았어요"}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- 올리기 (push) ---------- */
 
 function PushPanel({ r }: { r: RealRepo }) {
@@ -572,9 +772,9 @@ function PushPanel({ r }: { r: RealRepo }) {
             </p>
           </>
         )}
-        {repo.behind > 0 && (
+        {r.incoming.length > 0 && n > 0 && (
           <p className="text-[11px] leading-relaxed text-amber/90">
-            온라인에 아직 받지 않은 저장 지점 {repo.behind}개가 있어요. 올리기 전에 받아와야(pull) 할 수 있어요.
+            온라인에 아직 받지 않은 저장 지점 {r.incoming.length}개가 있어요. 위의 ‘받아오기’를 먼저 하면 올리기가 거절되지 않아요.
           </p>
         )}
       </div>

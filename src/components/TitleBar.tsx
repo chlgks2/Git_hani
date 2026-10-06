@@ -33,7 +33,14 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
       <div className="ml-auto flex items-stretch">
         <Tool icon={Undo2} label="되돌리기" git="undo" onClick={demo(() => s.openPick())} active={canRevert} />
         <Tool icon={Redo2} label="다시하기" git="redo" />
-        <Tool icon={CloudDownload} label="받아오기" git="pull" />
+        <Tool
+          icon={CloudDownload}
+          label="받아오기"
+          git="pull"
+          onClick={real ? () => r.pull() : undefined}
+          active={!!real && r.incoming.length > 0 && !r.pulling}
+          badge={(real && r.incoming.length) || undefined}
+        />
         <Tool icon={CloudUpload} label="올리기" git="push" onClick={real ? () => r.push() : () => s.push()}
           active={real ? r.unpushed.length > 0 && !r.pushing : canPush}
           badge={(real ? r.unpushed.length : s.unpushed.length) || undefined} />

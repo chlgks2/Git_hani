@@ -14,6 +14,9 @@ pub fn run() {
       commands::git_unpushed,
       commands::git_push,
       commands::git_commit_stats,
+      commands::git_fetch,
+      commands::git_incoming,
+      commands::git_pull,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

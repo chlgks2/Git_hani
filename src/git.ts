@@ -55,10 +55,12 @@ export function gitCommit(path: string, files: string[], message: string, descri
   });
 }
 
-/** 아직 온라인에 올리지 않은 저장 지점 (최신이 앞) */
-export interface UnpushedCommit extends CommitInfo {
+/** 저장 지점 + 그 저장 지점에서 바뀐 파일 이름들 */
+export interface CommitWithFiles extends CommitInfo {
   files: string[];
 }
+/** 아직 온라인에 올리지 않은 저장 지점 (최신이 앞) */
+export type UnpushedCommit = CommitWithFiles;
 
 export function gitUnpushed(path: string) {
   return invoke<UnpushedCommit[]>("git_unpushed", { path });
@@ -67,6 +69,26 @@ export function gitUnpushed(path: string) {
 /** upTo 를 주면 그 저장 지점까지만, 없으면 지금 갈래 전체를 올린다 */
 export function gitPush(path: string, upTo?: string) {
   return invoke<{ remote: string; branch: string; created: boolean }>("git_push", { path, upTo: upTo ?? null });
+}
+
+/** 온라인의 최신 기록을 내려받기만 한다. interactive 가 false 면 로그인 창을 띄우지 않는다 */
+export function gitFetch(path: string, interactive: boolean) {
+  return invoke<void>("git_fetch", { path, interactive });
+}
+
+/** 온라인에는 있지만 아직 받지 않은 저장 지점 (최신이 앞) */
+export function gitIncoming(path: string) {
+  return invoke<CommitWithFiles[]>("git_incoming", { path });
+}
+
+export interface PullResult {
+  kind: "upToDate" | "fastForward" | "merged" | "conflict";
+  count: number;
+  conflicts: string[];
+}
+
+export function gitPull(path: string) {
+  return invoke<PullResult>("git_pull", { path });
 }
 
 /** 저장 지점 하나에서 바뀐 파일과 줄 수 (바이너리 파일은 null) */

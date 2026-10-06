@@ -347,7 +347,19 @@ export function useScenario() {
   };
 
   const openPick = (typed?: string) => {
-    if (phase !== "restore" || restoreStep !== "broken") return;
+    if (phase !== "restore" || restoreStep !== "broken") {
+      // 데모에서는 되돌리기를 과제 2 에서 체험한다. 그 전에 누르면 아무 반응이 없어 보이지 않게 안내한다
+      if (phase === "save")
+        log({
+          title: typed ?? "되돌리기",
+          typed: !!typed,
+          lines: [
+            { tone: "plain", text: "되돌리기는 사이트가 망가졌을 때 잘 되던 상태로 돌아가는 기능이에요." },
+            { tone: "dim", text: "이 데모에서는 저장과 올리기를 마치고 ‘다음 과제’로 넘어가면 체험할 수 있어요." },
+          ],
+        });
+      return;
+    }
     setRestoreStep("pick");
     setSelectedId(head.id);
     log({

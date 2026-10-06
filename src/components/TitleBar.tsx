@@ -36,7 +36,7 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
           label="되돌리기"
           git="undo"
           onClick={real ? () => r.restoreShortcut() : () => s.openPick()}
-          active={real ? !!r.selected || (real.files.length > 0 && !real.merging) : canRevert}
+          active={real ? !real.merging && (!!r.selected || real.files.length > 0 || r.commits.length > 1) : canRevert}
         />
         <Tool icon={Redo2} label="다시하기" git="redo" />
         <Tool

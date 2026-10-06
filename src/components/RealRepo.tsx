@@ -68,6 +68,7 @@ export function useRealRepo() {
   const [selected, setSelected] = useState<string | null>(null); // 그래프에서 고른 저장 지점
   const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null); // 되돌리기 확인 창
   const [restoring, setRestoring] = useState(false);
+  const [undoOf, setUndoOf] = useState<string | null>(null); // "방금 저장한 것 되돌리기"일 때 그 저장 메시지
   const [diffFile, setDiffFile] = useState<string | null>(null); // diff 보기로 연 파일
   const [aiState, setAiState] = useState<AiState>("unknown");
   const [summary, setSummary] = useState<Summary | null>(null); // AI 가 설명한 바뀐 내용
@@ -491,8 +492,9 @@ export function useRealRepo() {
   const headHash = commits.find((c) => c.refs.some((ref) => ref === "HEAD" || ref.startsWith("HEAD -> ")))?.hash ?? null;
 
   /** 되돌리기 확인 창 열기: 무엇이 바뀌는지 먼저 계산해서 보여준다 */
-  const askRestore = async (target: string) => {
+  const askRestore = async (target: string, undoSubject: string | null = null) => {
     if (!repo) return;
+    setUndoOf(undoSubject);
     try {
       setRestoreAsk(await gitRestorePreview(repo.root, target));
     } catch (e) {
@@ -500,13 +502,20 @@ export function useRealRepo() {
     }
   };
 
-  /** 툴바의 되돌리기 버튼: 고른 저장 지점이 있으면 그쪽으로, 없으면 저장 안 한 변경 취소 */
+  /**
+   * 툴바의 되돌리기 버튼 (Ctrl+Z 처럼 "방금 한 일 취소"에 가깝게)
+   * 1) 그래프에서 고른 저장 지점이 있으면 → 그 시점으로
+   * 2) 저장 안 한 변경이 있으면 → 변경 모두 취소
+   * 3) 둘 다 없으면 → 방금 저장한 저장 지점을 되돌리기 (그 직전 상태로)
+   */
   const restoreShortcut = () => {
     if (selected) return askRestore(selected);
     if (repo?.files.length && headHash) return askRestore(headHash);
+    const head = commits.find((c) => c.hash === headHash);
+    if (head?.parents[0]) return askRestore(head.parents[0], head.subject);
     addBlock({
       title: "되돌리기",
-      lines: [{ tone: "plain", text: "그래프에서 돌아가고 싶은 저장 지점을 눌러 고른 뒤 다시 눌러 주세요." }],
+      lines: [{ tone: "plain", text: "되돌릴 이전 저장 지점이 없어요. (지금이 첫 저장 지점이에요)" }],
     });
   };
 
@@ -524,7 +533,7 @@ export function useRealRepo() {
       if (res.commit) lines.push({ tone: "dim", text: `되돌린 상태를 새 저장 지점으로 기록했어요 · ${res.commit.short} (기록은 지워지지 않아요)` });
       if (res.backup) lines.push({ tone: "dim", text: "그래프의 ‘되돌리기 전 백업’을 고르면 언제든 다시 되살릴 수 있어요" });
       addBlock({
-        title: res.uncommitted ? "백업 되살리기" : restoreAsk.isHead ? "변경 모두 취소" : "되돌리기",
+        title: res.uncommitted ? "백업 되살리기" : restoreAsk.isHead ? "변경 모두 취소" : undoOf ? `“${undoOf}” 되돌리기` : "되돌리기",
         git: `git restore --source=${t.short} .${res.commit ? " && git commit" : ""}`,
         lines,
       });
@@ -572,6 +581,7 @@ export function useRealRepo() {
     dismissConflict: () => setConflict(null),
     resolving, mergeFiles, reload, openResolver, closeResolver: () => setResolving(false), noteResolved, finishMerge, abortMerge,
     selected, setSelected, headHash, restoreAsk, restoring, askRestore, restoreShortcut, doRestore,
+    undoOf,
     cancelRestore: () => setRestoreAsk(null),
     diffFile, openDiff: (file: string) => setDiffFile(file), closeDiff: () => setDiffFile(null),
     aiState, summary, summarizing, suggesting, aiError, explainChanges, suggestMessage, checkAi,
@@ -1051,7 +1061,9 @@ function RestoreModal({ r, pv }: { r: RealRepo; pv: RestorePreview }) {
     ? "저장 안 한 변경을 모두 취소할까요?"
     : backup
       ? "되돌리기 전 백업을 되살릴까요?"
-      : `“${t.subject}” 상태로 되돌릴까요?`;
+      : r.undoOf
+        ? `방금 저장한 “${r.undoOf}”를 되돌릴까요?`
+        : `“${t.subject}” 상태로 되돌릴까요?`;
   const shown = pv.changes.slice(0, 12);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
@@ -1063,6 +1075,7 @@ function RestoreModal({ r, pv }: { r: RealRepo; pv: RestorePreview }) {
           <h3 className="mt-2 text-[16px] leading-snug font-semibold text-fg">{title}</h3>
           {!pv.isHead && (
             <p className="mt-1 font-mono text-[11px] text-dim">
+              {r.undoOf && <span className="font-sans">그 직전 저장 지점 “{t.subject}” 상태로 돌아가요 · </span>}
               {t.short} · {t.author} · {timeAgo(t.time)}
             </p>
           )}

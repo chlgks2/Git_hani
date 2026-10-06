@@ -109,9 +109,14 @@ export default function App() {
             return <span className={n ? "text-amber" : ""}>{n ? `● ${n} 변경` : "✓ 깨끗함"}</span>;
           })()}
           {!real && <span className="text-dim">데모</span>}
-          {!real && (
+          {!real ? (
             <span className="flex items-center gap-1 text-[#b9a6f5]">
               <Sparkles size={10} /> AI 도우미 연결됨
+            </span>
+          ) : (
+            <span className={`flex items-center gap-1 ${r.aiState === "ok" ? "text-[#b9a6f5]" : "text-dim"}`}>
+              <Sparkles size={10} />
+              {r.aiState === "ok" ? "AI 도우미 연결됨" : r.aiState === "nokey" ? "AI 서버: API 키 없음" : r.aiState === "offline" ? "AI 서버 꺼짐" : "AI 확인 중"}
             </span>
           )}
           <span className="ml-auto font-sans">회색 영어 단어에 마우스를 올리면 개발 용어의 뜻을 알려드려요</span>

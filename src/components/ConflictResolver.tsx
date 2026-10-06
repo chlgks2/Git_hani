@@ -2,7 +2,8 @@
 // Git 은 충돌 부분을 파일 안에 <<<<<<< ======= >>>>>>> 기호로 써 넣는데, 초보자는 이걸 직접 고치기 어렵다.
 // 이 화면은 그 부분을 "내 것 / 온라인 것" 카드로 보여주고, 버튼으로 고르면 기호 없이 깔끔한 파일을 만들어 준다.
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Code2, FileWarning, GitMerge, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Code2, FileWarning, GitMerge, Sparkles, X } from "lucide-react";
+import { aiExplainConflict, type ConflictExplanation } from "../ai";
 import { gitConflictFile, gitResolveFile, gitResolveWhole, type ConflictFile, type Segment } from "../git";
 import type { RealRepo } from "./RealRepo";
 
@@ -39,6 +40,8 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
   const [showRaw, setShowRaw] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 충돌 조각별 AI 설명 (불러오는 중이면 "loading", 실패하면 에러 문구)
+  const [explain, setExplain] = useState<Record<number, ConflictExplanation | "loading" | { error: string }>>({});
 
   // 지금 파일이 해결되면 다음 남은 파일로 (remaining 은 매번 새 배열이라 문자열로 바꿔 비교한다)
   const remainingKey = remaining.join("\n");
@@ -50,6 +53,7 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
   useEffect(() => {
     setCf(null);
     setChoices({});
+    setExplain({});
     setShowRaw(false);
     setError(null);
     if (!current) return;
@@ -61,6 +65,35 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     [cf],
   );
   const chosenAll = conflicts.length > 0 && conflicts.every((i) => choices[i]);
+
+  /** 충돌 조각 하나를 AI 에게 설명받는다. 앞뒤의 같은 줄도 조금 보내서 무엇에 관한 코드인지 알려준다 */
+  const askAi = async (i: number) => {
+    if (!cf?.segments || !current) return;
+    const seg = cf.segments[i];
+    if (seg.kind !== "conflict") return;
+    const near = (j: number, fromEnd: boolean) => {
+      const s = cf.segments![j];
+      if (!s || s.kind !== "same") return "";
+      const lines = s.text.split(/\r?\n/);
+      return (fromEnd ? lines.slice(-15) : lines.slice(0, 15)).join("\n");
+    };
+    setExplain((m) => ({ ...m, [i]: "loading" }));
+    try {
+      const res = await aiExplainConflict({
+        path: current,
+        oursLabel: ours,
+        theirsLabel: theirs,
+        ours: seg.ours,
+        theirs: seg.theirs,
+        base: seg.base,
+        before: near(i - 1, true),
+        after: near(i + 1, false),
+      });
+      setExplain((m) => ({ ...m, [i]: res }));
+    } catch (e) {
+      setExplain((m) => ({ ...m, [i]: { error: e instanceof Error ? e.message : String(e) } }));
+    }
+  };
 
   const saveFile = async () => {
     if (!cf?.segments || !chosenAll || !current) return;
@@ -201,6 +234,8 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
                         theirs={theirs}
                         choice={choices[i]}
                         onChoose={(c) => setChoices((m) => ({ ...m, [i]: c }))}
+                        explain={explain[i]}
+                        onAskAi={() => askAi(i)}
                       />
                     ),
                   )}
@@ -257,6 +292,8 @@ function ConflictBlock({
   theirs,
   choice,
   onChoose,
+  explain,
+  onAskAi,
 }: {
   n: number;
   seg: Extract<Segment, { kind: "conflict" }>;
@@ -264,7 +301,10 @@ function ConflictBlock({
   theirs: string;
   choice?: Choice;
   onChoose: (c: Choice) => void;
+  explain?: ConflictExplanation | "loading" | { error: string };
+  onAskAi: () => void;
 }) {
+  const ai = explain && explain !== "loading" && !("error" in explain) ? explain : null;
   const [showBase, setShowBase] = useState(false);
   const usesOurs = choice && choice !== "theirs";
   const usesTheirs = choice && choice !== "ours";
@@ -274,12 +314,44 @@ function ConflictBlock({
         <AlertTriangle size={13} className={choice ? "text-dim" : "text-amber"} />
         <span className={choice ? "text-muted" : "text-amber"}>충돌 {n}</span>
         <span className="text-dim">· 같은 부분을 서로 다르게 고쳤어요</span>
-        {choice && (
-          <span className="ml-auto flex items-center gap-1 text-green">
-            <Check size={12} /> {CHOICES.find((c) => c.key === choice)!.label}
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-3">
+          {choice && (
+            <span className="flex items-center gap-1 text-green">
+              <Check size={12} /> {CHOICES.find((c) => c.key === choice)!.label}
+            </span>
+          )}
+          {!ai && (
+            <button
+              onClick={onAskAi}
+              disabled={explain === "loading"}
+              className="flex items-center gap-1 text-[11px] text-[#b9a6f5] hover:underline disabled:opacity-60"
+            >
+              <Sparkles size={11} /> {explain === "loading" ? "AI 가 읽고 있어요…" : "AI 설명 듣기"}
+            </button>
+          )}
+        </span>
       </div>
+      {explain && explain !== "loading" && "error" in explain && (
+        <p className="border-b border-line-soft px-4 py-2 text-[11px] text-red/90">{explain.error}</p>
+      )}
+      {ai && (
+        <div className="rise space-y-1.5 border-b border-line-soft bg-[#b9a6f5]/5 px-4 py-3 text-[12px] leading-relaxed">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#b9a6f5]">
+            <Sparkles size={11} /> AI 설명
+          </div>
+          <p className="text-fg">{ai.summary}</p>
+          <p className="text-muted">
+            <span className="text-teal">내 것</span> · {ai.ours}
+          </p>
+          <p className="text-muted">
+            <span className="text-blue">온라인 것</span> · {ai.theirs}
+          </p>
+          <p className="text-muted">
+            <span className="text-[#b9a6f5]">추천</span> ·{" "}
+            {ai.recommendation === "manual" ? "직접 고치는 게 좋아요" : CHOICES.find((c) => c.key === ai.recommendation)?.label} — {ai.reason}
+          </p>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3 p-3">
         <Side title="내 것" sub={ours} text={seg.ours} tone="teal" dim={!!choice && !usesOurs} />
         <Side title="온라인 것" sub={theirs} text={seg.theirs} tone="blue" dim={!!choice && !usesTheirs} />
@@ -299,9 +371,10 @@ function ConflictBlock({
             onClick={() => onChoose(c.key)}
             className={`rounded-[3px] border px-3 py-1.5 text-[12px] ${
               choice === c.key ? "border-teal bg-teal/15 text-fg" : "border-line text-muted hover:border-teal/50 hover:text-fg"
-            }`}
+            } ${ai?.recommendation === c.key && choice !== c.key ? "border-[#b9a6f5]/60" : ""}`}
           >
             {c.label}
+            {ai?.recommendation === c.key && <span className="ml-1.5 text-[10px] text-[#b9a6f5]">✦ 추천</span>}
           </button>
         ))}
       </div>

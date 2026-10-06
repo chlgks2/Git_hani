@@ -19,3 +19,4 @@ Thumbs.db
 
 # TypeScript build cache
 *.tsbuildinfo
+!.env.example

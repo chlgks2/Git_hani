@@ -25,6 +25,8 @@ Git을 잘 모르는 사람도 바뀐 내용을 확인하고, 저장(커밋)하�
     - 한쪽에서 지운 파일·이미지는 파일 전체로 선택
     - 파일별 저장 → 모두 끝나면 [합치기 완료], 언제든 [합치기 취소]로 받아오기 전 상태로
   - 다른 프로그램에서 파일을 바꾸고 창으로 돌아오면 자동으로 다시 읽음
+  - diff 보기: 파일을 누르면 바뀐 줄을 나란히 / 한 줄로 보기
+  - AI 도우미 (server/ 의 AI 서버 필요): 바뀐 내용 쉬운 말 설명, 저장 메시지 추천, 충돌 설명과 추천 선택
   - 실행할 때 폴더 경로를 주면 그 저장소를 바로 엶 (`git-hani.exe D:\프로젝트`)
   - 되돌리기: 그래프에서 저장 지점을 골라 [이 상태로 되돌리기]
     - 기록을 지우지 않고, 그 상태 그대로의 새 저장 지점을 하나 더 만듦 (온라인에 올린 기록도 안전)
@@ -40,6 +42,7 @@ Git을 잘 모르는 사람도 바뀐 내용을 확인하고, 저장(커밋)하�
 | 화면 | React, TypeScript, Vite, Tailwind CSS |
 | 데스크톱 | Tauri 2 (Rust) |
 | Git | PC에 설치된 git CLI 실행 |
+| AI 서버 | NestJS, Anthropic SDK (Claude) — `server/` |
 
 ## 실행 방법
 
@@ -56,6 +59,9 @@ npm run desktop
 
 # 실행 파일 빌드
 npm run tauri build
+
+# AI 서버 켜기 (처음 한 번: server/.env 에 ANTHROPIC_API_KEY 설정, server/README.md 참고)
+npm run ai
 ```
 
 Rust 단위 테스트:

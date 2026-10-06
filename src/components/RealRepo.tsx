@@ -1,6 +1,6 @@
 // 실제 저장소 모드: 사용자가 고른 폴더의 상태·저장 기록을 보여주고, 고른 파일을 커밋한다.
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, LifeBuoy, RefreshCw, RotateCcw, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, LifeBuoy, RefreshCw, RotateCcw, Sparkles, Undo2, X } from "lucide-react";
 import {
   gitCommit,
   gitAbortMerge,
@@ -31,6 +31,7 @@ import {
   type UnpushedCommit,
 } from "../git";
 import type { Block } from "../store";
+import { aiCommitMessage, aiHealth, aiSummarize, collectPatches, type AiState, type Summary } from "../ai";
 import RealGraph from "./RealGraph";
 import Splitter, { clamp } from "./Splitter";
 import { BlockView } from "./Terminal";
@@ -64,6 +65,11 @@ export function useRealRepo() {
   const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null); // 되돌리기 확인 창
   const [restoring, setRestoring] = useState(false);
   const [diffFile, setDiffFile] = useState<string | null>(null); // diff 보기로 연 파일
+  const [aiState, setAiState] = useState<AiState>("unknown");
+  const [summary, setSummary] = useState<Summary | null>(null); // AI 가 설명한 바뀐 내용
+  const [summarizing, setSummarizing] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -119,8 +125,74 @@ export function useRealRepo() {
     setDescription("");
     setConflict(null);
     setLastCheck(null);
+    setSummary(null);
     await load(path, "저장소 열기");
     void quietCheck();
+    void checkAi();
+  };
+
+  /* ---------- AI ---------- */
+
+  const checkAi = async () => {
+    const st = await aiHealth();
+    setAiState(st);
+    return st;
+  };
+
+  /** 바뀐 파일들을 AI 가 쉬운 말로 설명한다 (비밀 정보 파일은 보내지 않음) */
+  const explainChanges = async () => {
+    if (!repo || summarizing) return;
+    setSummarizing(true);
+    setAiError(null);
+    try {
+      const { patches, skipped } = await collectPatches(repo.root, repo.files);
+      if (!patches.length) throw new Error("설명할 수 있는 파일이 없어요. (비밀 정보 파일은 AI 에게 보내지 않아요)");
+      const res = await aiSummarize(patches);
+      setSummary(res);
+      setAiState("ok");
+      addBlock({
+        title: "바뀐 내용 설명",
+        git: "git diff",
+        lines: [
+          { tone: "ai", text: res.overall },
+          ...res.files.map((f) => ({ tone: "dim" as const, text: `  ${f.path} — ${f.summary}` })),
+          ...(skipped.length ? [{ tone: "dim" as const, text: `  비밀 정보로 보이는 파일 ${skipped.length}개는 AI 에게 보내지 않았어요` }] : []),
+          ...(res.truncated ? [{ tone: "dim" as const, text: "  변경이 많아 일부만 보고 설명했어요" }] : []),
+        ],
+      });
+    } catch (e) {
+      setAiError(String(e instanceof Error ? e.message : e));
+      void checkAi();
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
+  /** 체크한 파일로 저장 메시지를 추천받아 칸에 채운다 */
+  const suggestMessage = async () => {
+    if (!repo || suggesting) return;
+    const picked = repo.files.filter((f) => checkedRef.current.has(f.path));
+    if (!picked.length) return;
+    setSuggesting(true);
+    setAiError(null);
+    try {
+      const { patches } = await collectPatches(repo.root, picked);
+      if (!patches.length) throw new Error("체크한 파일이 모두 비밀 정보 파일이라 AI 에게 보내지 않았어요.");
+      // 이 저장소의 최근 저장 메시지로 말투를 맞춘다 (합치기·되돌리기 메시지는 빼고)
+      const recent = commits
+        .map((c) => c.subject)
+        .filter((s) => !/^(Merge |되돌리기:)/.test(s))
+        .slice(0, 10);
+      const res = await aiCommitMessage(patches, recent);
+      setMessage(res.title);
+      setDescription(res.body);
+      setAiState("ok");
+    } catch (e) {
+      setAiError(String(e instanceof Error ? e.message : e));
+      void checkAi();
+    } finally {
+      setSuggesting(false);
+    }
   };
 
   /**
@@ -264,6 +336,7 @@ export function useRealRepo() {
       });
       setMessage("");
       setDescription("");
+      setSummary(null);
       await fetchAll(repo.root);
     } catch (e) {
       addBlock({ title: "커밋하기", git: "git commit", lines: [{ tone: "err", text: String(e) }] });
@@ -453,6 +526,7 @@ export function useRealRepo() {
       });
       setRestoreAsk(null);
       setSelected(null);
+      setSummary(null);
       await reload();
     } catch (e) {
       addBlock({ title: "되돌리기", git: "git restore", lines: [{ tone: "err", text: String(e) }] });
@@ -469,6 +543,7 @@ export function useRealRepo() {
         if (!path) return;
         await load(path, "저장소 열기");
         await quietCheck();
+        await checkAi();
       })
       .catch(() => {});
   }, []);
@@ -495,6 +570,7 @@ export function useRealRepo() {
     selected, setSelected, headHash, restoreAsk, restoring, askRestore, restoreShortcut, doRestore,
     cancelRestore: () => setRestoreAsk(null),
     diffFile, openDiff: (file: string) => setDiffFile(file), closeDiff: () => setDiffFile(null),
+    aiState, summary, summarizing, suggesting, aiError, explainChanges, suggestMessage, checkAi,
   };
 }
 
@@ -656,7 +732,14 @@ export function RealInspector({ r }: { r: RealRepo }) {
           {repo.files.length ? (
             <ul className="border border-line-soft">
               {repo.files.map((f) => (
-                <FileRow key={f.path} f={f} on={r.checked.has(f.path)} toggle={() => r.toggle(f.path)} view={() => r.openDiff(f.path)} />
+                <FileRow
+                  key={f.path}
+                  f={f}
+                  on={r.checked.has(f.path)}
+                  toggle={() => r.toggle(f.path)}
+                  view={() => r.openDiff(f.path)}
+                  explain={r.summary?.files.find((s) => s.path === f.path)?.summary}
+                />
               ))}
             </ul>
           ) : (
@@ -666,8 +749,29 @@ export function RealInspector({ r }: { r: RealRepo }) {
           )}
         </div>
 
+        {repo.files.length > 0 && (
+          <div className="-mt-2 space-y-2 px-4 pb-3">
+            {r.summary && (
+              <div className="rise border-l-2 border-[#b9a6f5]/60 pl-2.5 text-[12px] leading-relaxed text-fg/90">
+                <Sparkles size={11} className="mr-1 inline text-[#b9a6f5]" />
+                {r.summary.overall}
+                {r.summary.truncated && <span className="text-dim"> (변경이 많아 일부만 보고 설명했어요)</span>}
+              </div>
+            )}
+            <button
+              onClick={r.explainChanges}
+              disabled={r.summarizing}
+              className="flex w-full items-center justify-center gap-1.5 rounded-[3px] border border-[#b9a6f5]/30 py-1.5 text-[12px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-60"
+            >
+              {r.summarizing ? <Spin /> : <Sparkles size={13} />}
+              {r.summarizing ? "AI 가 읽고 있어요…" : r.summary ? "다시 설명 듣기" : "무엇이 바뀌었는지 쉬운 말로 설명 듣기"}
+            </button>
+            <AiNotice r={r} />
+          </div>
+        )}
+
         {repo.files.length > 0 && !repo.merging && r.headHash && (
-          <div className="-mt-2 px-4 pb-3">
+          <div className="-mt-1 px-4 pb-3">
             <button
               onClick={() => r.askRestore(r.headHash!)}
               className="flex items-center gap-1.5 text-[11px] text-dim hover:text-red"
@@ -684,13 +788,23 @@ export function RealInspector({ r }: { r: RealRepo }) {
               저장 메시지 <GitChip term="commit" />
             </div>
             <div className="space-y-2 p-4">
-              <input
-                value={r.message}
-                onChange={(e) => r.setMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && r.commit()}
-                placeholder="무엇을 바꿨나요? (예: 로그인 화면 문구 수정)"
-                className="w-full rounded-[3px] border border-line bg-base px-2.5 py-2 text-[13px] text-fg outline-none placeholder:text-dim focus:border-teal/60"
-              />
+              <div className="relative">
+                <input
+                  value={r.message}
+                  onChange={(e) => r.setMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && r.commit()}
+                  placeholder="무엇을 바꿨나요? (예: 로그인 화면 문구 수정)"
+                  className="w-full rounded-[3px] border border-line bg-base py-2 pr-20 pl-2.5 text-[13px] text-fg outline-none placeholder:text-dim focus:border-teal/60"
+                />
+                <button
+                  onClick={r.suggestMessage}
+                  disabled={!n || r.suggesting}
+                  title="체크한 파일의 변경을 보고 저장 메시지를 추천해요"
+                  className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1 rounded-[3px] px-1.5 py-1 text-[11px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-40"
+                >
+                  {r.suggesting ? <Spin /> : <Sparkles size={11} />} AI 추천
+                </button>
+              </div>
               <textarea
                 value={r.description}
                 onChange={(e) => r.setDescription(e.target.value)}
@@ -731,7 +845,19 @@ export function RealInspector({ r }: { r: RealRepo }) {
   );
 }
 
-function FileRow({ f, on, toggle, view }: { f: FileChange; on: boolean; toggle: () => void; view: () => void }) {
+function FileRow({
+  f,
+  on,
+  toggle,
+  view,
+  explain,
+}: {
+  f: FileChange;
+  on: boolean;
+  toggle: () => void;
+  view: () => void;
+  explain?: string;
+}) {
   const secret = looksSecret(f.path);
   return (
     <li className="border-b border-line-soft last:border-0">
@@ -754,6 +880,12 @@ function FileRow({ f, on, toggle, view }: { f: FileChange; on: boolean; toggle: 
           diff
         </button>
       </div>
+      {explain && (
+        <div className="rise px-2.5 pb-1.5 pl-[42px] text-[12px] leading-snug text-muted">
+          <Sparkles size={10} className="mr-1 inline text-[#b9a6f5]" />
+          {explain}
+        </div>
+      )}
       {secret && !on && (
         <div className="px-2.5 pb-1.5 pl-[42px] text-[10px] text-amber/80">비밀 정보일 수 있어서 기본으로 뺐어요</div>
       )}
@@ -818,6 +950,25 @@ function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
       </div>
     </div>
   );
+}
+
+/* ---------- AI 상태 안내 ---------- */
+
+function AiNotice({ r }: { r: RealRepo }) {
+  if (r.aiError) return <p className="text-[11px] leading-relaxed whitespace-pre-line text-red/90">{r.aiError}</p>;
+  if (r.aiState === "offline")
+    return (
+      <p className="text-[11px] leading-relaxed text-dim">
+        AI 서버가 꺼져 있어요. <span className="font-mono">server</span> 폴더에서 <span className="font-mono">npm run start:dev</span> 로 켜 주세요.
+      </p>
+    );
+  if (r.aiState === "nokey")
+    return (
+      <p className="text-[11px] leading-relaxed text-dim">
+        AI 서버에 API 키가 없어요. <span className="font-mono">server/.env</span> 에 <span className="font-mono">ANTHROPIC_API_KEY</span> 를 넣어 주세요.
+      </p>
+    );
+  return null;
 }
 
 /* ---------- 되돌리기 ---------- */

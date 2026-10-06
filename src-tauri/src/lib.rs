@@ -17,6 +17,13 @@ pub fn run() {
       commands::git_fetch,
       commands::git_incoming,
       commands::git_pull,
+      commands::git_start_merge,
+      commands::git_conflict_file,
+      commands::git_resolve_file,
+      commands::git_resolve_whole,
+      commands::git_finish_merge,
+      commands::git_abort_merge,
+      commands::startup_path,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

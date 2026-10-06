@@ -39,6 +39,8 @@ pub struct RepoStatus {
     pub no_commits: bool,
     /// 연결된 온라인 저장소 이름들 (보통 "origin" 하나)
     pub remotes: Vec<String>,
+    /// 합치기(merge)가 진행 중인지 — 충돌을 해결하는 도중
+    pub merging: bool,
     pub files: Vec<FileChange>,
 }
 
@@ -171,6 +173,7 @@ pub fn status(path: &str) -> Result<RepoStatus, String> {
         behind: 0,
         no_commits: false,
         remotes: run_git(root_path, ["remote"])?.lines().map(String::from).collect(),
+        merging: is_merging(root_path),
         files: Vec::new(),
     };
 
@@ -388,7 +391,13 @@ pub fn unpushed(path: &str) -> Result<Vec<CommitWithFiles>, String> {
 }
 
 fn has_upstream(root_path: &Path) -> bool {
-    run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"]).is_ok()
+    upstream_name(root_path).is_some()
+}
+
+/// 연결된 온라인 갈래 이름 (예: "origin/main").
+/// 합칠 때 "@{u}" 대신 이 이름을 써야 충돌 표시와 합친 저장 지점 메시지에 알아볼 수 있는 이름이 남는다.
+fn upstream_name(root_path: &Path) -> Option<String> {
+    run_git(root_path, ["rev-parse", "--abbrev-ref", "@{u}"]).ok().map(|u| u.trim().to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -545,7 +554,8 @@ pub fn pull(path: &str) -> Result<PullResult, String> {
     }
 
     // 양쪽 모두 새 저장 지점이 있으면 합친다
-    match run_git(root_path, ["merge", "--no-edit", "@{u}"]) {
+    let up = upstream_name(root_path).unwrap_or_else(|| "@{u}".into());
+    match run_git(root_path, ["merge", "--no-edit", up.as_str()]) {
         Ok(_) => Ok(PullResult { kind: "merged".into(), count: incoming, conflicts: vec![] }),
         Err(e) => {
             // 충돌 난 파일 목록 (--diff-filter=U : 합치지 못한 파일)
@@ -579,6 +589,221 @@ fn friendly_pull_error(e: String) -> String {
     } else {
         format!("받아오지 못했어요.\n{e}")
     }
+}
+
+/* ---------- 충돌 해결 ---------- */
+
+fn is_merging(root_path: &Path) -> bool {
+    run_git(root_path, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+}
+
+/// 아직 해결하지 않은 충돌 파일들
+fn unmerged_files(root_path: &Path) -> Vec<String> {
+    run_git(root_path, ["diff", "--name-only", "--diff-filter=U"])
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// 받아오기에서 충돌이 났던 합치기를 다시 시작하고, 충돌 상태를 그대로 둔다 (해결 화면에서 고르기 위해).
+/// 충돌 없이 합쳐지면 빈 목록을 돌려준다.
+pub fn start_merge(path: &str) -> Result<Vec<String>, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if is_merging(root_path) {
+        return Ok(unmerged_files(root_path)); // 이미 해결하는 중이면 이어서
+    }
+    let Some(up) = upstream_name(root_path) else {
+        return Err("온라인 갈래와 연결되어 있지 않아서 합칠 대상이 없어요.".into());
+    };
+    match run_git(root_path, ["merge", "--no-edit", up.as_str()]) {
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => {
+            let files = unmerged_files(root_path);
+            if files.is_empty() {
+                Err(friendly_pull_error(e))
+            } else {
+                Ok(files)
+            }
+        }
+    }
+}
+
+/// 충돌 파일 안의 한 조각: 양쪽이 같은 부분이거나, 서로 다르게 고친 부분
+#[derive(Debug, Serialize, PartialEq)]
+// tag = "kind" : JSON 에 {"kind": "same", ...} / {"kind": "conflict", ...} 처럼 종류를 적어 보낸다
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Segment {
+    Same { text: String },
+    Conflict {
+        ours: String,
+        theirs: String,
+        /// diff3 방식 설정이면 들어 있는 "원래 내용"
+        base: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictFile {
+    pub path: String,
+    /// 줄 단위로 고를 수 있으면 조각들. 아니면(이미지, 한쪽에서 삭제 등) None → 파일 전체로 고른다
+    pub segments: Option<Vec<Segment>>,
+    /// 원래 Git 이 파일에 써 넣은 그대로의 내용 (기호 포함)
+    pub raw: String,
+    pub ours_exists: bool,
+    pub theirs_exists: bool,
+}
+
+/// 줄이 특정 충돌 기호로 시작하는지 (줄 끝 \r\n 은 무시)
+fn marker(line: &str, sign: char) -> bool {
+    let t = line.trim_end_matches(['\r', '\n']);
+    t.len() >= 7 && t.chars().take(7).all(|c| c == sign) && (t.len() == 7 || t.as_bytes()[7] == b' ')
+}
+
+/// <<<<<<< ======= >>>>>>> 기호가 들어간 내용을 조각으로 나눈다. 기호가 없거나 짝이 안 맞으면 None.
+/// 줄바꿈 문자(\n, \r\n)를 그대로 보존해서, 다시 이어 붙이면 원래 내용과 똑같아진다.
+pub fn parse_conflicts(text: &str) -> Option<Vec<Segment>> {
+    enum State {
+        Normal,
+        Ours,
+        Base,
+        Theirs,
+    }
+    let mut state = State::Normal;
+    let mut out = Vec::new();
+    let (mut same, mut ours, mut base, mut theirs) = (String::new(), String::new(), String::new(), String::new());
+    let mut has_base = false;
+    let mut found = false;
+
+    // split_inclusive : 줄을 나누되 줄바꿈 문자를 각 줄 끝에 남겨 둔다
+    for line in text.split_inclusive('\n') {
+        match state {
+            State::Normal if marker(line, '<') => {
+                if !same.is_empty() {
+                    out.push(Segment::Same { text: std::mem::take(&mut same) });
+                }
+                state = State::Ours;
+                found = true;
+            }
+            State::Normal => same.push_str(line),
+            State::Ours if marker(line, '|') => {
+                state = State::Base;
+                has_base = true;
+            }
+            State::Ours | State::Base if marker(line, '=') => state = State::Theirs,
+            State::Ours => ours.push_str(line),
+            State::Base => base.push_str(line),
+            State::Theirs if marker(line, '>') => {
+                out.push(Segment::Conflict {
+                    ours: std::mem::take(&mut ours),
+                    theirs: std::mem::take(&mut theirs),
+                    base: if has_base { Some(std::mem::take(&mut base)) } else { None },
+                });
+                has_base = false;
+                state = State::Normal;
+            }
+            State::Theirs => theirs.push_str(line),
+        }
+    }
+    // 기호가 없거나, 충돌 조각이 끝나지 않은 채 파일이 끝나면 줄 단위로 다룰 수 없다
+    if !found || !matches!(state, State::Normal) {
+        return None;
+    }
+    if !same.is_empty() {
+        out.push(Segment::Same { text: same });
+    }
+    Some(out)
+}
+
+/// 저장소 안의 상대 경로인지 확인 (.. 이나 절대 경로로 저장소 밖 파일을 건드리지 못하게)
+fn safe_rel_path(file: &str) -> Result<&str, String> {
+    let p = Path::new(file);
+    if file.is_empty() || p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("잘못된 파일 경로예요.".into());
+    }
+    Ok(file)
+}
+
+/// 충돌 파일 하나를 읽어 해결 화면에 보여줄 형태로 만든다
+pub fn conflict_file(path: &str, file: &str) -> Result<ConflictFile, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    let file = safe_rel_path(file)?;
+    // :2:파일 = 충돌 중 "내 것", :3:파일 = "온라인 것" (git 이 따로 보관해 둔다)
+    let exists = |stage: &str| run_git(root_path, ["cat-file", "-e", format!(":{stage}:{file}").as_str()]).is_ok();
+    let raw = std::fs::read(root_path.join(file))
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok()) // 이미지 같은 바이너리면 None
+        .unwrap_or_default();
+    Ok(ConflictFile {
+        path: file.to_string(),
+        segments: parse_conflicts(&raw),
+        raw,
+        ours_exists: exists("2"),
+        theirs_exists: exists("3"),
+    })
+}
+
+/// 고른 결과로 파일을 저장하고 "해결됨"으로 표시한다(git add)
+pub fn resolve_file(path: &str, file: &str, content: &str) -> Result<(), String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    let file = safe_rel_path(file)?;
+    if content.split_inclusive('\n').any(|l| marker(l, '<') || marker(l, '>')) {
+        return Err("아직 고르지 않은 충돌 부분이 남아 있어요.".into());
+    }
+    std::fs::write(root_path.join(file), content).map_err(|e| format!("파일을 저장하지 못했어요. ({e})"))?;
+    run_git(root_path, ["add", "--", file])?;
+    Ok(())
+}
+
+/// 파일 전체를 한쪽 것으로 고른다. side: "ours"(내 것) / "theirs"(온라인 것)
+/// 고른 쪽에서 파일이 지워졌다면 지운 상태로 정한다.
+pub fn resolve_whole(path: &str, file: &str, side: &str) -> Result<(), String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    let file = safe_rel_path(file)?;
+    let (flag, stage) = match side {
+        "ours" => ("--ours", "2"),
+        "theirs" => ("--theirs", "3"),
+        _ => return Err("내 것(ours) 또는 온라인 것(theirs) 중에서 골라 주세요.".into()),
+    };
+    if run_git(root_path, ["cat-file", "-e", format!(":{stage}:{file}").as_str()]).is_ok() {
+        run_git(root_path, ["checkout", flag, "--", file])?;
+        run_git(root_path, ["add", "--", file])?;
+    } else {
+        run_git(root_path, ["rm", "-q", "--", file])?;
+    }
+    Ok(())
+}
+
+/// 모든 충돌을 해결했으면 합치기를 마무리한다(합친 저장 지점 만들기)
+pub fn finish_merge(path: &str) -> Result<CommitResult, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if !is_merging(root_path) {
+        return Err("진행 중인 합치기가 없어요.".into());
+    }
+    let left = unmerged_files(root_path);
+    if !left.is_empty() {
+        return Err(format!("아직 해결하지 않은 파일이 있어요.\n{}", left.join("\n")));
+    }
+    run_git(root_path, ["commit", "--no-edit"]).map_err(friendly_commit_error)?;
+    let hash = run_git(root_path, ["rev-parse", "HEAD"])?.trim().to_string();
+    let short = hash.chars().take(7).collect();
+    Ok(CommitResult { hash, short })
+}
+
+/// 합치기를 그만두고 받아오기 전 상태로 되돌린다
+pub fn abort_merge(path: &str) -> Result<(), String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    if !is_merging(root_path) {
+        return Ok(());
+    }
+    run_git(root_path, ["merge", "--abort"]).map(|_| ())
 }
 
 /* ---------- 저장 지점 하나의 변경 요약 ---------- */
@@ -640,6 +865,7 @@ mod tests {
             behind: 0,
             no_commits: false,
             remotes: vec![],
+            merging: false,
             files: vec![],
         }
     }
@@ -686,6 +912,8 @@ mod tests {
         run_git(&dir, ["init", "-q", "-b", "main"]).unwrap();
         run_git(&dir, ["config", "user.name", "tester"]).unwrap();
         run_git(&dir, ["config", "user.email", "tester@example.com"]).unwrap();
+        // PC 설정(core.autocrlf)에 따라 줄바꿈이 CRLF 로 바뀌지 않게 고정 - 내용 비교를 정확히 하기 위해
+        run_git(&dir, ["config", "core.autocrlf", "false"]).unwrap();
         dir
     }
 
@@ -992,6 +1220,116 @@ mod tests {
         save(&work, "a.txt", "1");
         assert!(pull(&p).unwrap_err().contains("연결되어 있지 않아서"));
         cleanup(&[&work, &bare]);
+    }
+
+    #[test]
+    fn parse_simple_conflict_keeps_text() {
+        let text = "a\n<<<<<<< HEAD\n내 줄\n=======\n팀원 줄\n>>>>>>> origin/main\nb\n";
+        let segs = parse_conflicts(text).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::Same { text: "a\n".into() },
+                Segment::Conflict { ours: "내 줄\n".into(), theirs: "팀원 줄\n".into(), base: None },
+                Segment::Same { text: "b\n".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_diff3_and_crlf() {
+        let text = "<<<<<<< HEAD\r\nx\r\n||||||| base\r\no\r\n=======\r\ny\r\n>>>>>>> t\r\n";
+        let segs = parse_conflicts(text).unwrap();
+        assert_eq!(
+            segs,
+            vec![Segment::Conflict { ours: "x\r\n".into(), theirs: "y\r\n".into(), base: Some("o\r\n".into()) }]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_no_or_broken_markers() {
+        assert!(parse_conflicts("그냥 파일\n").is_none());
+        assert!(parse_conflicts("<<<<<<< HEAD\n끝나지 않음\n").is_none());
+        // ======= 만 있는 줄(마크다운 제목 밑줄 등)은 충돌 기호가 아니다
+        assert!(parse_conflicts("제목\n=======\n").is_none());
+    }
+
+    #[test]
+    fn unsafe_paths_are_rejected() {
+        assert!(safe_rel_path("../밖.txt").is_err());
+        assert!(safe_rel_path("a/../../b").is_err());
+        assert!(safe_rel_path("src/ok.txt").is_ok());
+    }
+
+    /// 나와 팀원이 같은 줄을 고쳐 충돌이 나는 상황을 만든다
+    fn conflicted(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let (work, bare) = repo_with_remote(tag);
+        let p = work.to_string_lossy().into_owned();
+        write(&work, "a.txt", "첫 줄\n바꿀 줄\n끝 줄\n");
+        commit(&p, &["a.txt".into()], "처음", None).unwrap();
+        save(&work, "gone.txt", "지워질 파일");
+        push(&p, None).unwrap();
+        let mate = teammate(&work, &bare);
+        write(&mate, "a.txt", "첫 줄\n팀원이 바꾼 줄\n끝 줄\n");
+        std::fs::remove_file(mate.join("gone.txt")).unwrap();
+        run_git(&mate, ["commit", "-qam", "팀원 수정"]).unwrap();
+        run_git(&mate, ["push", "-q"]).unwrap();
+        write(&work, "a.txt", "첫 줄\n내가 바꾼 줄\n끝 줄\n");
+        write(&work, "gone.txt", "나는 고쳤음");
+        commit(&p, &["a.txt".into(), "gone.txt".into()], "내 수정", None).unwrap();
+        fetch(&p, false).unwrap();
+        (work, bare, mate)
+    }
+
+    #[test]
+    fn resolve_conflicts_and_finish() {
+        let (work, bare, mate) = conflicted("resolve");
+        let p = work.to_string_lossy().into_owned();
+
+        let mut files = start_merge(&p).unwrap();
+        files.sort();
+        assert_eq!(files, vec!["a.txt".to_string(), "gone.txt".to_string()]);
+        assert!(status(&p).unwrap().merging);
+
+        // a.txt: 줄 단위로 고를 수 있어야 한다
+        let cf = conflict_file(&p, "a.txt").unwrap();
+        let segs = cf.segments.unwrap();
+        assert!(matches!(&segs[1], Segment::Conflict { ours, theirs, .. } if ours == "내가 바꾼 줄\n" && theirs == "팀원이 바꾼 줄\n"));
+        // 충돌 표시에 "@{u}" 가 아니라 알아볼 수 있는 이름이 남아야 한다
+        assert!(cf.raw.contains(">>>>>>> origin/main"), "{}", cf.raw);
+        // 기호가 남은 내용은 저장 거절
+        assert!(resolve_file(&p, "a.txt", &cf.raw).is_err());
+        resolve_file(&p, "a.txt", "첫 줄\n내가 바꾼 줄\n팀원이 바꾼 줄\n끝 줄\n").unwrap();
+
+        // gone.txt: 팀원은 지웠고 나는 고침 → 파일 전체로 고른다
+        let g = conflict_file(&p, "gone.txt").unwrap();
+        assert!(g.ours_exists && !g.theirs_exists);
+        assert!(finish_merge(&p).is_err()); // 아직 남아 있음
+        resolve_whole(&p, "gone.txt", "ours").unwrap();
+
+        finish_merge(&p).unwrap();
+        assert!(!status(&p).unwrap().merging);
+        assert_eq!(
+            std::fs::read_to_string(work.join("a.txt")).unwrap(),
+            "첫 줄\n내가 바꾼 줄\n팀원이 바꾼 줄\n끝 줄\n"
+        );
+        push(&p, None).unwrap(); // 합친 결과를 올릴 수 있어야 한다
+        cleanup(&[&work, &bare, &mate]);
+    }
+
+    #[test]
+    fn abort_returns_to_before() {
+        let (work, bare, mate) = conflicted("abort");
+        let p = work.to_string_lossy().into_owned();
+        let before = run_git(&work, ["rev-parse", "HEAD"]).unwrap();
+        start_merge(&p).unwrap();
+        resolve_whole(&p, "gone.txt", "theirs").unwrap(); // 일부만 해결한 상태에서
+        abort_merge(&p).unwrap();
+        assert!(!status(&p).unwrap().merging);
+        assert_eq!(run_git(&work, ["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "첫 줄\n내가 바꾼 줄\n끝 줄\n");
+        assert!(work.join("gone.txt").exists());
+        cleanup(&[&work, &bare, &mate]);
     }
 
     #[test]

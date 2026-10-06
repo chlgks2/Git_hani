@@ -3,15 +3,20 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, GitMerge, KeyRound, RefreshCw } from "lucide-react";
 import {
   gitCommit,
+  gitAbortMerge,
   gitFetch,
+  gitFinishMerge,
   gitIncoming,
   gitLog,
   gitPull,
   gitPush,
+  gitStartMerge,
   gitStatus,
   gitUnpushed,
   looksSecret,
+  isDesktop,
   pickFolder,
+  startupPath,
   timeAgo,
   STATUS_LABEL,
   STATUS_TONE,
@@ -49,6 +54,8 @@ export function useRealRepo() {
   const [checking, setChecking] = useState(false);
   const [lastCheck, setLastCheck] = useState<number | null>(null); // 마지막으로 온라인을 확인한 시각(초)
   const [conflict, setConflict] = useState<string[] | null>(null); // 마지막 받아오기에서 충돌 난 파일
+  const [resolving, setResolving] = useState(false); // 충돌 해결 화면을 열었는지
+  const [mergeFiles, setMergeFiles] = useState<string[]>([]); // 이번 합치기에서 충돌 난 파일 전체
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -190,6 +197,8 @@ export function useRealRepo() {
     setUnpushed([]);
     setIncoming([]);
     setConflict(null);
+    setResolving(false);
+    setMergeFiles([]);
     setLog([]);
   };
 
@@ -307,6 +316,99 @@ export function useRealRepo() {
     }
   };
 
+  /* ---------- 충돌 해결 ---------- */
+
+  /** 화면만 조용히 다시 읽는다 (작업 기록을 남기지 않음) */
+  const reload = async () => {
+    if (pathRef.current) await fetchAll(pathRef.current).catch(() => {});
+  };
+
+  /** 충돌 해결 화면 열기: 이미 합치는 중이면 이어서, 아니면 합치기를 다시 시작한다 */
+  const openResolver = async () => {
+    if (!repo) return;
+    if (repo.merging) {
+      const left = repo.files.filter((f) => f.status === "U").map((f) => f.path);
+      setMergeFiles((prev) => (prev.length ? prev : left));
+      setResolving(true);
+      return;
+    }
+    try {
+      const files = await gitStartMerge(repo.root);
+      if (!files.length) {
+        addBlock({ title: "합치기", git: "git merge", lines: [{ tone: "ok", text: "충돌 없이 합쳐졌어요" }] });
+        setConflict(null);
+        await reload();
+        return;
+      }
+      setMergeFiles(files);
+      setConflict(null);
+      addBlock({
+        title: "충돌 해결 시작",
+        git: `git merge ${repo.upstream ?? ""}`,
+        lines: [
+          { tone: "warn", text: `충돌 파일 ${files.length}개 — 화면에서 어떤 내용을 남길지 골라 주세요` },
+          ...files.map((f) => ({ tone: "dim" as const, text: `  충돌  ${f}` })),
+        ],
+      });
+      await reload();
+      setResolving(true);
+    } catch (e) {
+      addBlock({ title: "충돌 해결 시작", git: "git merge", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  const noteResolved = (file: string, what: string) =>
+    addBlock({ title: "충돌 해결", git: `git add ${file}`, lines: [{ tone: "ok", text: `${file} — ${what}` }] });
+
+  const finishMerge = async () => {
+    if (!repo) return;
+    try {
+      const res = await gitFinishMerge(repo.root);
+      addBlock({
+        title: "합치기 완료",
+        git: "git commit --no-edit",
+        lines: [
+          { tone: "ok", text: `충돌을 모두 해결하고 합친 저장 지점을 만들었어요 · ${res.short}` },
+          { tone: "dim", text: "합친 결과는 아직 온라인에 없어요. ‘올리기’로 올려 주세요" },
+        ],
+      });
+      setResolving(false);
+      setMergeFiles([]);
+      await reload();
+    } catch (e) {
+      addBlock({ title: "합치기 완료", git: "git commit", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  const abortMerge = async () => {
+    if (!repo) return;
+    try {
+      await gitAbortMerge(repo.root);
+      addBlock({
+        title: "합치기 취소",
+        git: "git merge --abort",
+        lines: [{ tone: "ok", text: "합치기를 취소하고 받아오기 전 상태로 되돌렸어요. 내 파일은 그대로예요" }],
+      });
+      setResolving(false);
+      setMergeFiles([]);
+      await reload();
+    } catch (e) {
+      addBlock({ title: "합치기 취소", git: "git merge --abort", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  // 실행할 때 폴더를 함께 줬으면 그 폴더를 바로 연다
+  useEffect(() => {
+    if (!isDesktop()) return;
+    startupPath()
+      .then(async (path) => {
+        if (!path) return;
+        await load(path, "저장소 열기");
+        await quietCheck();
+      })
+      .catch(() => {});
+  }, []);
+
   // 다른 프로그램(AI 코딩 도구 등)에서 파일을 바꾸고 돌아오면 자동으로 다시 읽는다
   useEffect(() => {
     const onFocus = () => {
@@ -325,6 +427,7 @@ export function useRealRepo() {
     open, refresh, close, toggle, toggleAll, commit, push, pull, checkNow,
     cancelSecret: () => setSecretAsk(null),
     dismissConflict: () => setConflict(null),
+    resolving, mergeFiles, reload, openResolver, closeResolver: () => setResolving(false), noteResolved, finishMerge, abortMerge,
   };
 }
 
@@ -451,6 +554,27 @@ export function RealInspector({ r }: { r: RealRepo }) {
         </div>
 
         <div className="space-y-4 p-4">
+          {repo.merging && (
+            <div className="space-y-2 border border-amber/40 bg-amber/5 p-3 text-[12px] leading-relaxed">
+              <div className="flex items-center gap-1.5 font-medium text-amber">
+                <GitMerge size={13} /> 합치는 중이에요
+              </div>
+              <p className="text-muted">
+                충돌 {repo.files.filter((f) => f.status === "U").length}개가 남아 있어요. 해결을 마치거나 취소해야 다른 작업을 할 수 있어요.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={r.openResolver}
+                  className="rounded-[3px] bg-amber px-3 py-1.5 text-[12px] font-semibold text-[#2a1a00] hover:brightness-110"
+                >
+                  이어서 해결하기
+                </button>
+                <button onClick={r.abortMerge} className="text-[11px] text-dim hover:text-red">
+                  합치기 취소
+                </button>
+              </div>
+            </div>
+          )}
           <Sync repo={repo} />
 
           {repo.files.length ? (
@@ -466,7 +590,7 @@ export function RealInspector({ r }: { r: RealRepo }) {
           )}
         </div>
 
-        {repo.files.length > 0 && (
+        {repo.files.length > 0 && !repo.merging && (
           <div className="border-t border-line-soft">
             <div className="flex h-8 items-center gap-2 border-b border-line-soft px-4 text-[11px] font-medium tracking-wide text-muted">
               저장 메시지 <GitChip term="commit" />
@@ -631,10 +755,18 @@ function PullPanel({ r }: { r: RealRepo }) {
                 <li key={f}>· {f}</li>
               ))}
             </ul>
-            <p className="text-[11px] text-dim">두 내용 중 무엇을 쓸지 고르는 충돌 해결 화면은 다음 단계에서 연결돼요.</p>
-            <button onClick={r.dismissConflict} className="text-[11px] text-dim hover:text-muted">
-              닫기
-            </button>
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                onClick={r.openResolver}
+                className="rounded-[3px] bg-amber px-3 py-1.5 text-[12px] font-semibold text-[#2a1a00] hover:brightness-110"
+              >
+                충돌 해결하기
+              </button>
+              <button onClick={r.dismissConflict} className="text-[11px] text-dim hover:text-muted">
+                나중에
+              </button>
+            </div>
+            <p className="text-[11px] text-dim">두 내용 중 무엇을 남길지 화면에서 골라 합칠 수 있어요.</p>
           </div>
         )}
 

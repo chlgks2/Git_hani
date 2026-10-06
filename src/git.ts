@@ -33,10 +33,15 @@ export interface RepoStatus {
   noCommits: boolean;
   /** 연결된 온라인 저장소 이름들 (보통 "origin") */
   remotes: string[];
+  /** 합치기(merge) 진행 중 = 충돌을 해결하는 도중 */
+  merging: boolean;
   files: FileChange[];
 }
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+/** 실행할 때 함께 준 폴더 경로 (git-hani.exe D:\프로젝트). 없으면 null */
+export const startupPath = () => invoke<string | null>("startup_path");
 
 export function gitStatus(path: string) {
   return invoke<RepoStatus>("git_status", { path });
@@ -90,6 +95,32 @@ export interface PullResult {
 export function gitPull(path: string) {
   return invoke<PullResult>("git_pull", { path });
 }
+
+/* ---------- 충돌 해결 ---------- */
+
+export type Segment =
+  | { kind: "same"; text: string }
+  | { kind: "conflict"; ours: string; theirs: string; base: string | null };
+
+export interface ConflictFile {
+  path: string;
+  /** 줄 단위로 고를 수 없으면(이미지, 한쪽에서 삭제 등) null */
+  segments: Segment[] | null;
+  /** Git 이 파일에 써 넣은 그대로의 내용 (<<<<<<< 기호 포함) */
+  raw: string;
+  oursExists: boolean;
+  theirsExists: boolean;
+}
+
+/** 충돌이 났던 합치기를 다시 시작한다. 충돌 파일 목록 (비어 있으면 충돌 없이 합쳐짐) */
+export const gitStartMerge = (path: string) => invoke<string[]>("git_start_merge", { path });
+export const gitConflictFile = (path: string, file: string) => invoke<ConflictFile>("git_conflict_file", { path, file });
+export const gitResolveFile = (path: string, file: string, content: string) =>
+  invoke<void>("git_resolve_file", { path, file, content });
+export const gitResolveWhole = (path: string, file: string, side: "ours" | "theirs") =>
+  invoke<void>("git_resolve_whole", { path, file, side });
+export const gitFinishMerge = (path: string) => invoke<{ hash: string; short: string }>("git_finish_merge", { path });
+export const gitAbortMerge = (path: string) => invoke<void>("git_abort_merge", { path });
 
 /** 저장 지점 하나에서 바뀐 파일과 줄 수 (바이너리 파일은 null) */
 export interface FileStat {

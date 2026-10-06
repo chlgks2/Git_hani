@@ -69,3 +69,41 @@ pub async fn git_incoming(path: String) -> Result<Vec<git::CommitWithFiles>, Str
 pub async fn git_pull(path: String) -> Result<git::PullResult, String> {
     blocking(move || git::pull(&path)).await
 }
+
+#[tauri::command]
+pub async fn git_start_merge(path: String) -> Result<Vec<String>, String> {
+    blocking(move || git::start_merge(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_conflict_file(path: String, file: String) -> Result<git::ConflictFile, String> {
+    blocking(move || git::conflict_file(&path, &file)).await
+}
+
+#[tauri::command]
+pub async fn git_resolve_file(path: String, file: String, content: String) -> Result<(), String> {
+    blocking(move || git::resolve_file(&path, &file, &content)).await
+}
+
+#[tauri::command]
+pub async fn git_resolve_whole(path: String, file: String, side: String) -> Result<(), String> {
+    blocking(move || git::resolve_whole(&path, &file, &side)).await
+}
+
+#[tauri::command]
+pub async fn git_finish_merge(path: String) -> Result<git::CommitResult, String> {
+    blocking(move || git::finish_merge(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_abort_merge(path: String) -> Result<(), String> {
+    blocking(move || git::abort_merge(&path)).await
+}
+
+/// 실행할 때 폴더 경로를 함께 주면(예: git-hani.exe D:\내프로젝트) 그 폴더를 바로 연다.
+/// 나중에 탐색기 오른쪽 클릭 "Git GUI 로 열기" 같은 기능에도 쓸 수 있다.
+#[tauri::command]
+pub fn startup_path() -> Option<String> {
+    // args().nth(1) : 0번은 실행 파일 자신, 1번이 첫 번째 인자
+    std::env::args().nth(1).filter(|p| std::path::Path::new(p).is_dir())
+}

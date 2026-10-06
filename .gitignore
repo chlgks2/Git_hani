@@ -1,0 +1,21 @@
+# dependencies / build output
+node_modules/
+dist/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# local env
+.env
+.env.*
+
+# TypeScript build cache
+*.tsbuildinfo

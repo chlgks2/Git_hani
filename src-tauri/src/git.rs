@@ -970,6 +970,162 @@ pub fn restore_to(path: &str, target: &str) -> Result<RestoreResult, String> {
     Ok(RestoreResult { backup, commit, changed, uncommitted: false })
 }
 
+/* ---------- 파일 하나의 바뀐 줄 (diff 보기) ---------- */
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    /// "ctx" 그대로 / "add" 추가된 줄 / "del" 지워진 줄
+    pub kind: String,
+    /// 원래 파일에서의 줄 번호 (추가된 줄은 None)
+    pub old: Option<u32>,
+    /// 바뀐 파일에서의 줄 번호 (지워진 줄은 None)
+    pub new: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunk {
+    /// "@@ -10,7 +10,8 @@ function foo" 같은 머리줄
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiff {
+    pub path: String,
+    /// 이미지 같은 바이너리 파일이라 줄 단위로 볼 수 없음
+    pub binary: bool,
+    /// 너무 커서 줄 단위로 보여주지 않음
+    pub too_large: bool,
+    /// git 이 아직 모르는 새 파일
+    pub untracked: bool,
+    pub added: u32,
+    pub deleted: u32,
+    pub hunks: Vec<DiffHunk>,
+}
+
+/// 한 번에 보여줄 diff 의 최대 크기 (이보다 크면 줄 단위 표시를 건너뛴다)
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
+/// "git diff" 출력(unified 형식)을 조각(hunk)과 줄로 나눈다
+pub fn parse_unified_diff(raw: &str) -> Vec<DiffHunk> {
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let (mut old_no, mut new_no) = (0u32, 0u32);
+    for line in raw.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // "@@ -10,7 +10,8 @@ ..." 에서 시작 줄 번호를 읽는다
+            let mut nums = rest.split_whitespace();
+            let start = |s: Option<&str>, sign: char| -> u32 {
+                s.and_then(|t| t.strip_prefix(sign))
+                    .and_then(|t| t.split(',').next())
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            };
+            old_no = start(nums.next(), '-');
+            new_no = start(nums.next(), '+');
+            hunks.push(DiffHunk { header: line.to_string(), lines: Vec::new() });
+            continue;
+        }
+        // 첫 @@ 전의 머리줄(diff --git, index, ---, +++)은 건너뛴다
+        let Some(h) = hunks.last_mut() else { continue };
+        let (kind, text) = match line.chars().next() {
+            Some('+') => ("add", &line[1..]),
+            Some('-') => ("del", &line[1..]),
+            Some(' ') => ("ctx", &line[1..]),
+            Some('\\') => continue, // "\ No newline at end of file"
+            None => ("ctx", ""),
+            _ => continue,
+        };
+        let (old, new) = match kind {
+            "add" => (None, Some(new_no)),
+            "del" => (Some(old_no), None),
+            _ => (Some(old_no), Some(new_no)),
+        };
+        if old.is_some() {
+            old_no += 1;
+        }
+        if new.is_some() {
+            new_no += 1;
+        }
+        h.lines.push(DiffLine { kind: kind.into(), old, new, text: text.to_string() });
+    }
+    hunks
+}
+
+/// 저장하지 않은 변경 중 파일 하나가 마지막 저장 지점과 비교해 어떻게 바뀌었는지
+pub fn file_diff(path: &str, file: &str) -> Result<FileDiff, String> {
+    let root = repo_root(path)?;
+    let root_path = Path::new(&root);
+    let file = safe_rel_path(file)?;
+    let has_head = run_git(root_path, ["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
+    let tracked = run_git(root_path, ["ls-files", "--error-unmatch", "--", file]).is_ok()
+        || (has_head && run_git(root_path, ["cat-file", "-e", format!("HEAD:{file}").as_str()]).is_ok());
+
+    let mut out = FileDiff {
+        path: file.to_string(),
+        binary: false,
+        too_large: false,
+        untracked: !tracked,
+        added: 0,
+        deleted: 0,
+        hunks: Vec::new(),
+    };
+
+    if !tracked || !has_head {
+        // git 이 모르는 새 파일: 파일 전체가 추가된 것으로 보여준다
+        let bytes = std::fs::read(root_path.join(file)).map_err(|e| format!("파일을 읽지 못했어요. ({e})"))?;
+        if bytes.len() > MAX_DIFF_BYTES {
+            out.too_large = true;
+            return Ok(out);
+        }
+        let Ok(text) = String::from_utf8(bytes) else {
+            out.binary = true;
+            return Ok(out);
+        };
+        if text.contains('\0') {
+            out.binary = true;
+            return Ok(out);
+        }
+        let lines: Vec<DiffLine> = text
+            .lines()
+            .enumerate()
+            .map(|(i, l)| DiffLine {
+                kind: "add".into(),
+                old: None,
+                new: Some(i as u32 + 1),
+                text: l.strip_suffix('\r').unwrap_or(l).to_string(),
+            })
+            .collect();
+        out.added = lines.len() as u32;
+        out.hunks.push(DiffHunk { header: format!("@@ -0,0 +1,{} @@", lines.len()), lines });
+        return Ok(out);
+    }
+
+    // 마지막 저장 지점(HEAD)과 지금 파일(stage 여부 상관없이)을 비교
+    let raw = run_git(root_path, ["diff", "--no-color", "--no-ext-diff", "-U3", "HEAD", "--", file])?;
+    if raw.len() > MAX_DIFF_BYTES {
+        out.too_large = true;
+        return Ok(out);
+    }
+    if raw.lines().any(|l| l.starts_with("Binary files ")) {
+        out.binary = true;
+        return Ok(out);
+    }
+    out.hunks = parse_unified_diff(&raw);
+    for l in out.hunks.iter().flat_map(|h| &h.lines) {
+        match l.kind.as_str() {
+            "add" => out.added += 1,
+            "del" => out.deleted += 1,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /* ---------- 저장 지점 하나의 변경 요약 ---------- */
 
 #[derive(Debug, Serialize)]
@@ -1591,6 +1747,54 @@ mod tests {
         assert!(restore_to(&p, "--hard").is_err());
         assert!(restore_to(&p, "main").is_err()); // 해시나 backup/ 갈래만
         assert!(restore_to(&p, "deadbeef").is_err()); // 없는 저장 지점
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn parse_unified_diff_numbers_lines() {
+        let raw = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n\
+                   @@ -1,3 +1,3 @@ 제목\n 첫 줄\r\n-옛 줄\n+새 줄\n 끝 줄\n\\ No newline at end of file\n";
+        let h = parse_unified_diff(raw);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].header, "@@ -1,3 +1,3 @@ 제목");
+        let kinds: Vec<(&str, Option<u32>, Option<u32>, &str)> =
+            h[0].lines.iter().map(|l| (l.kind.as_str(), l.old, l.new, l.text.as_str())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("ctx", Some(1), Some(1), "첫 줄"),
+                ("del", Some(2), None, "옛 줄"),
+                ("add", None, Some(2), "새 줄"),
+                ("ctx", Some(3), Some(3), "끝 줄"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_diff_cases() {
+        let dir = temp_repo("diff");
+        let p = dir.to_string_lossy().into_owned();
+        write(&dir, "a.txt", "1\n2\n3\n");
+        write(&dir, "gone.txt", "지울 파일\n");
+        commit(&p, &["a.txt".into(), "gone.txt".into()], "처음", None).unwrap();
+
+        write(&dir, "a.txt", "1\n둘\n3\n4\n"); // 수정
+        let d = file_diff(&p, "a.txt").unwrap();
+        assert_eq!((d.added, d.deleted, d.untracked), (2, 1, false));
+
+        write(&dir, "new.txt", "새\n파일\n"); // 새 파일
+        let d = file_diff(&p, "new.txt").unwrap();
+        assert!(d.untracked);
+        assert_eq!(d.added, 2);
+        assert_eq!(d.hunks[0].lines[1].new, Some(2));
+
+        std::fs::remove_file(dir.join("gone.txt")).unwrap(); // 삭제
+        let d = file_diff(&p, "gone.txt").unwrap();
+        assert_eq!((d.added, d.deleted), (0, 1));
+
+        std::fs::write(dir.join("img.bin"), [0u8, 159, 146, 150]).unwrap(); // 바이너리 새 파일
+        assert!(file_diff(&p, "img.bin").unwrap().binary);
+        assert!(file_diff(&p, "../밖.txt").is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 

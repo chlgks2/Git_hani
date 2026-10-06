@@ -154,6 +154,30 @@ export const gitRestoreTo = (path: string, target: string) => invoke<RestoreResu
 /** 되돌리기 전 백업 갈래인지 (backup/before-restore-…) */
 export const isBackupRef = (name: string) => name.startsWith("backup/before-restore-");
 
+/* ---------- diff 보기 ---------- */
+
+export interface DiffLine {
+  kind: "ctx" | "add" | "del";
+  old: number | null;
+  new: number | null;
+  text: string;
+}
+export interface DiffHunk {
+  header: string;
+  lines: DiffLine[];
+}
+export interface FileDiff {
+  path: string;
+  binary: boolean;
+  tooLarge: boolean;
+  untracked: boolean;
+  added: number;
+  deleted: number;
+  hunks: DiffHunk[];
+}
+/** 저장하지 않은 변경 중 파일 하나의 바뀐 줄 (마지막 저장 지점과 비교) */
+export const gitFileDiff = (path: string, file: string) => invoke<FileDiff>("git_file_diff", { path, file });
+
 /** 저장 지점 하나에서 바뀐 파일과 줄 수 (바이너리 파일은 null) */
 export interface FileStat {
   path: string;

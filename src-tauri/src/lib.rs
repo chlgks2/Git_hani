@@ -26,6 +26,7 @@ pub fn run() {
       commands::startup_path,
       commands::git_restore_preview,
       commands::git_restore_to,
+      commands::git_file_diff,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

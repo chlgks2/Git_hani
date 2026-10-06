@@ -117,3 +117,8 @@ pub async fn git_restore_preview(path: String, target: String) -> Result<git::Re
 pub async fn git_restore_to(path: String, target: String) -> Result<git::RestoreResult, String> {
     blocking(move || git::restore_to(&path, &target)).await
 }
+
+#[tauri::command]
+pub async fn git_file_diff(path: String, file: String) -> Result<git::FileDiff, String> {
+    blocking(move || git::file_diff(&path, &file)).await
+}

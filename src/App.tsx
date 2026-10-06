@@ -10,6 +10,7 @@ import Inspector from "./components/Inspector";
 import { ConfirmRestoreModal, DoneModal, SafetyModal } from "./components/Modals";
 import { RealExplorer, RealInspector, RealMain, useRealRepo } from "./components/RealRepo";
 import ConflictResolver from "./components/ConflictResolver";
+import DiffViewer from "./components/DiffViewer";
 import { isDesktop } from "./git";
 
 export default function App() {
@@ -118,6 +119,7 @@ export default function App() {
 
         {!real && s.safety && <SafetyModal s={s} />}
         {real && r.resolving && <ConflictResolver r={r} />}
+        {real && r.diffFile && !r.resolving && <DiffViewer r={r} />}
         {s.phase === "restore" && s.restoreStep === "confirm" && <ConfirmRestoreModal s={s} />}
         {s.phase === "done" && <DoneModal s={s} />}
       </div>

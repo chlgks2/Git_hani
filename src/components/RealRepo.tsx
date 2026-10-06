@@ -63,6 +63,7 @@ export function useRealRepo() {
   const [selected, setSelected] = useState<string | null>(null); // 그래프에서 고른 저장 지점
   const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null); // 되돌리기 확인 창
   const [restoring, setRestoring] = useState(false);
+  const [diffFile, setDiffFile] = useState<string | null>(null); // diff 보기로 연 파일
 
   const pathRef = useRef<string | null>(null);
   const checkedRef = useRef(checked);
@@ -208,6 +209,7 @@ export function useRealRepo() {
     setMergeFiles([]);
     setSelected(null);
     setRestoreAsk(null);
+    setDiffFile(null);
     setLog([]);
   };
 
@@ -492,6 +494,7 @@ export function useRealRepo() {
     resolving, mergeFiles, reload, openResolver, closeResolver: () => setResolving(false), noteResolved, finishMerge, abortMerge,
     selected, setSelected, headHash, restoreAsk, restoring, askRestore, restoreShortcut, doRestore,
     cancelRestore: () => setRestoreAsk(null),
+    diffFile, openDiff: (file: string) => setDiffFile(file), closeDiff: () => setDiffFile(null),
   };
 }
 
@@ -537,7 +540,12 @@ export function RealExplorer({ r }: { r: RealRepo }) {
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-2">
           {repo.files.map((f) => (
-            <div key={f.path} className="flex h-[26px] items-center gap-1.5 pr-2 pl-6 hover:bg-hover" title={f.path}>
+            <div
+              key={f.path}
+              onClick={() => r.openDiff(f.path)}
+              className="flex h-[26px] cursor-pointer items-center gap-1.5 pr-2 pl-6 hover:bg-hover"
+              title={`${f.path} — 눌러서 바뀐 줄 보기`}
+            >
               {looksSecret(f.path) ? <KeyRound size={13} className="shrink-0 text-amber" /> : <FileCode2 size={13} className="shrink-0 text-dim" />}
               <span className={`truncate ${STATUS_TONE[f.status]}`}>{f.path}</span>
               <span className={`ml-auto font-mono text-[11px] ${STATUS_TONE[f.status]}`}>{f.status}</span>
@@ -648,7 +656,7 @@ export function RealInspector({ r }: { r: RealRepo }) {
           {repo.files.length ? (
             <ul className="border border-line-soft">
               {repo.files.map((f) => (
-                <FileRow key={f.path} f={f} on={r.checked.has(f.path)} toggle={() => r.toggle(f.path)} />
+                <FileRow key={f.path} f={f} on={r.checked.has(f.path)} toggle={() => r.toggle(f.path)} view={() => r.openDiff(f.path)} />
               ))}
             </ul>
           ) : (
@@ -723,19 +731,29 @@ export function RealInspector({ r }: { r: RealRepo }) {
   );
 }
 
-function FileRow({ f, on, toggle }: { f: FileChange; on: boolean; toggle: () => void }) {
+function FileRow({ f, on, toggle, view }: { f: FileChange; on: boolean; toggle: () => void; view: () => void }) {
   const secret = looksSecret(f.path);
   return (
     <li className="border-b border-line-soft last:border-0">
-      <button onClick={toggle} className="flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left hover:bg-hover/50">
-        <Box on={on} />
-        <span className={`w-3 font-mono text-[12px] ${STATUS_TONE[f.status]}`}>{f.status}</span>
-        <span className={`min-w-0 flex-1 truncate font-mono text-[12px] ${on ? "text-fg/90" : "text-dim"}`} title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}>
-          {f.path}
+      <div className="flex w-full items-center gap-2.5 px-2.5 py-1.5 hover:bg-hover/50">
+        <button onClick={toggle} title={on ? "이번 저장에서 빼기" : "이번 저장에 넣기"}>
+          <Box on={on} />
+        </button>
+        <span className={`w-3 font-mono text-[12px] ${STATUS_TONE[f.status]}`} title={STATUS_LABEL[f.status]}>
+          {f.status}
         </span>
+        <button
+          onClick={view}
+          className={`min-w-0 flex-1 truncate text-left font-mono text-[12px] hover:underline ${on ? "text-fg/90" : "text-dim"}`}
+          title={`${f.origPath ? `${f.origPath} → ` : ""}${f.path} — 눌러서 바뀐 줄 보기`}
+        >
+          {f.path}
+        </button>
         {secret && <KeyRound size={11} className="shrink-0 text-amber" />}
-        <span className="shrink-0 text-[10px] text-dim">{STATUS_LABEL[f.status]}</span>
-      </button>
+        <button onClick={view} className="shrink-0 font-mono text-[10px] text-dim hover:text-teal">
+          diff
+        </button>
+      </div>
       {secret && !on && (
         <div className="px-2.5 pb-1.5 pl-[42px] text-[10px] text-amber/80">비밀 정보일 수 있어서 기본으로 뺐어요</div>
       )}

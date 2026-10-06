@@ -47,6 +47,8 @@ Git을 잘 모르는 사람도 바뀐 내용을 확인하고, 저장(커밋)하�
 | Git | PC에 설치된 git CLI 실행 |
 | AI 서버 | NestJS, Anthropic SDK (Claude) — `server/` |
 
+왜 이 구성을 골랐는지는 [docs/기술-선택.md](docs/기술-선택.md) 에 정리해 두었습니다.
+
 ## 실행 방법
 
 필요한 것: Node.js, Rust(rustup), Git, Windows의 경우 Visual Studio C++ Build Tools

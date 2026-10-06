@@ -92,6 +92,7 @@ export function useScenario() {
   const [envIgnored, setEnvIgnored] = useState(false);
   const [envChoice, setEnvChoice] = useState<"excluded" | "included" | null>(null);
   const [safety, setSafety] = useState<Safety>(null);
+  const [undoAsk, setUndoAsk] = useState<Commit | null>(null); // 과제 1: 방금 저장한 것 되돌리기 확인 창
   const [pushing, setPushing] = useState<string | null>(null);
 
   // 과제 2: 되돌리기
@@ -330,6 +331,58 @@ export function useScenario() {
 
   const canNext = phase === "save" && pending.filter((p) => p !== ".env").length === 0 && local.length > 0;
 
+  /**
+   * 과제 1: 방금 저장한 것 되돌리기
+   * - 아직 안 올린 저장 지점: 저장만 취소하고 바뀐 내용·메시지를 저장 전으로 돌려놓는다 (git reset --soft)
+   * - 이미 올린 저장 지점: 온라인 기록은 지울 수 없으니 "되돌리기" 저장 지점을 하나 더 쌓는다
+   */
+  const doUndo = () => {
+    const c = undoAsk;
+    setUndoAsk(null);
+    if (!c) return;
+    const files = c.files ?? [];
+    if (!c.pushed) {
+      setLocal((l) => l.filter((x) => x.id !== c.id));
+      setPending((p) => ALL_PATHS.filter((x) => p.includes(x) || files.includes(x)));
+      setChecked(files);
+      setMessage(c.msg);
+      log({
+        title: `“${c.msg}” 저장 취소`,
+        git: "git reset --soft HEAD~1",
+        lines: [
+          { tone: "ok", text: "저장을 취소했어요. 바뀐 내용은 그대로 남아 있어요" },
+          ...files.map((f) => ({ tone: "dim" as const, text: `  되돌아온 변경  ${f}` })),
+          { tone: "dim", text: "메시지나 체크한 파일을 고쳐서 다시 저장하면 돼요" },
+        ],
+      });
+      return;
+    }
+    const idx = local.length;
+    setLocal((l) => [
+      {
+        id: `undo${idx}`,
+        hash: NEW_HASHES[idx % NEW_HASHES.length],
+        msg: `되돌리기: “${c.msg}” 이전 상태로`,
+        when: "방금",
+        lane: 0,
+        parents: [head.id],
+        preview: "before",
+        files,
+        pushed: false,
+        local: true,
+      },
+      ...l,
+    ]);
+    log({
+      title: `“${c.msg}” 되돌리기`,
+      git: `git revert ${c.hash}`,
+      lines: [
+        { tone: "ok", text: "이미 온라인에 올린 저장 지점이라, 되돌린 상태를 새 저장 지점으로 하나 더 쌓았어요" },
+        { tone: "dim", text: "온라인 기록은 지워지지 않아요. ‘올리기’를 하면 팀원도 되돌린 상태를 받아요" },
+      ],
+    });
+  };
+
   const goBroken = () => {
     if (!canNext) return;
     timers.current.t2Start = Date.now();
@@ -348,16 +401,18 @@ export function useScenario() {
 
   const openPick = (typed?: string) => {
     if (phase !== "restore" || restoreStep !== "broken") {
-      // 데모에서는 되돌리기를 과제 2 에서 체험한다. 그 전에 누르면 아무 반응이 없어 보이지 않게 안내한다
-      if (phase === "save")
+      // 과제 1 에서는 "방금 저장한 것 되돌리기"로 동작한다
+      if (phase === "save") {
+        if (local[0]) return setUndoAsk(local[0]);
         log({
           title: typed ?? "되돌리기",
           typed: !!typed,
           lines: [
-            { tone: "plain", text: "되돌리기는 사이트가 망가졌을 때 잘 되던 상태로 돌아가는 기능이에요." },
-            { tone: "dim", text: "이 데모에서는 저장과 올리기를 마치고 ‘다음 과제’로 넘어가면 체험할 수 있어요." },
+            { tone: "plain", text: "아직 되돌릴 저장 지점이 없어요." },
+            { tone: "dim", text: "저장(커밋)한 뒤에 누르면, 잘못 저장한 걸 되돌릴 수 있어요." },
           ],
         });
+      }
       return;
     }
     setRestoreStep("pick");
@@ -621,6 +676,7 @@ export function useScenario() {
     }
     if (has("되돌", "원래대로", "복구", "revert", "reset", "restore", "undo")) {
       if (phase === "restore" && restoreStep === "broken") return openPick(text);
+      if (phase === "save") return openPick(text);
       return say([{ tone: "dim", text: "지금은 되돌릴 필요가 없어 보여요. 사이트가 잘 동작하고 있어요." }]);
     }
     if (has("올려", "올리", "push", "업로드")) {
@@ -700,6 +756,7 @@ export function useScenario() {
     setBackupParent(null);
     setConflictStep("incoming");
     setDemoResolved(null);
+    setUndoAsk(null);
     const s = welcomeSession();
     setSessions([s]);
     setActiveId(s.id);
@@ -730,6 +787,7 @@ export function useScenario() {
     askConfirm: () => setRestoreStep("confirm"),
     cancelConfirm: () => setRestoreStep("pick"),
     doRestore, finish: () => setPhase("done"), reset,
+    undoAsk, doUndo, cancelUndo: () => setUndoAsk(null),
     conflictStep, demoResolved, goConflict, demoPull, demoOpenResolver, demoSaveFile, demoAbort, demoFinish,
     demoCloseResolver: () => setConflictStep("merging"),
     newSession, closeSession, toggleSplit, runInput,

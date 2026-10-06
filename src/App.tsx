@@ -7,7 +7,7 @@ import Explorer from "./components/Explorer";
 import GitGraph from "./components/GitGraph";
 import Terminal from "./components/Terminal";
 import Inspector from "./components/Inspector";
-import { ConfirmRestoreModal, DoneModal, SafetyModal } from "./components/Modals";
+import { ConfirmRestoreModal, DoneModal, SafetyModal, UndoModal } from "./components/Modals";
 import { RealExplorer, RealInspector, RealMain, realResolverBackend, useRealRepo } from "./components/RealRepo";
 import { demoResolverBackend } from "./demoResolver";
 import ConflictResolver from "./components/ConflictResolver";
@@ -124,6 +124,7 @@ export default function App() {
         </footer>
 
         {!real && s.safety && <SafetyModal s={s} />}
+        {!real && s.undoAsk && <UndoModal s={s} />}
         {real && r.resolving && <ConflictResolver backend={realResolverBackend(r)} />}
         {!real && s.phase === "conflict" && s.conflictStep === "resolving" && <ConflictResolver backend={demoResolverBackend(s)} />}
         {real && r.diffFile && !r.resolving && <DiffViewer r={r} />}

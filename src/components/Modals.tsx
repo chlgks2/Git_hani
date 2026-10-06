@@ -117,6 +117,47 @@ export function ConfirmRestoreModal({ s }: { s: Scenario }) {
   );
 }
 
+/** 과제 1: 방금 저장한 것 되돌리기 확인 */
+export function UndoModal({ s }: { s: Scenario }) {
+  const c = s.undoAsk;
+  if (!c) return null;
+  return (
+    <Shell accent="var(--color-teal)">
+      <div className="p-5">
+        <div className="flex items-center gap-2 text-[11px] font-medium tracking-wide text-teal">
+          <RotateCcw size={13} /> 되돌리기
+        </div>
+        <h3 className="mt-2 text-[16px] leading-snug font-semibold text-fg">방금 저장한 “{c.msg}”를 되돌릴까요?</h3>
+        <p className="mt-1 font-mono text-[11px] text-dim">
+          {c.hash} · 파일 {c.files?.length ?? 0}개 · {c.pushed ? "온라인에 올라감" : "아직 올리기 전"}
+        </p>
+        <div className="mt-4 flex items-start gap-2.5 border-l-2 border-green/60 pl-3 text-[12px] leading-relaxed text-muted">
+          <LifeBuoy size={14} className="mt-0.5 shrink-0 text-green" />
+          {c.pushed ? (
+            <span>
+              <span className="text-fg">이미 온라인에 올린 저장 지점이에요.</span> 기록을 지우지 않고, 되돌린 상태를 새 저장 지점으로 하나 더
+              쌓아요. 팀원에게 이미 전해졌을 수 있어서 이렇게 하는 게 안전해요.
+            </span>
+          ) : (
+            <span>
+              <span className="text-fg">아직 올리기 전이라 저장만 취소해요.</span> 바뀐 내용과 메시지는 그대로 돌아오니, 고쳐서 다시
+              저장하면 돼요.
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 border-t border-line-soft p-4">
+        <button onClick={s.cancelUndo} className="px-4 text-[12px] text-dim hover:text-muted">
+          취소
+        </button>
+        <div className="w-32">
+          <Primary onClick={s.doUndo}>되돌리기</Primary>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
 export function DoneModal({ s }: { s: Scenario }) {
   const t = s.timers.current;
   const sec = (a: number, b: number) => (b > a ? `${Math.round((b - a) / 1000)}초` : "-");

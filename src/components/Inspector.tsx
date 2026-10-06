@@ -1,7 +1,7 @@
 // 오른쪽 패널: 바뀐 파일 고르기 → 커밋 메시지 → 커밋하기 → 올리기(푸시)
 import { Fragment, useRef, useState } from "react";
-import { AlertTriangle, Check, CheckCircle2, Cloud, CloudUpload, GitCommitHorizontal, KeyRound, RotateCcw, Sparkles } from "lucide-react";
-import { BROKEN, CHANGED_FILES, type ChangedFile } from "../data";
+import { AlertTriangle, ArrowDown, Check, CheckCircle2, Cloud, CloudDownload, CloudUpload, GitCommitHorizontal, GitMerge, KeyRound, RotateCcw, Sparkles } from "lucide-react";
+import { BROKEN, CHANGED_FILES, DEMO_CONFLICT_FILE, DEMO_TEAMMATE, type ChangedFile } from "../data";
 import type { Scenario } from "../store";
 import SitePreview from "./SitePreview";
 import Splitter, { clamp } from "./Splitter";
@@ -23,6 +23,8 @@ export default function Inspector({ s }: { s: Scenario }) {
   if (s.phase === "save") {
     panes.push({ key: "changes", node: <ChangesPanel s={s} /> });
     if (s.pending.length) panes.push({ key: "commit", node: <CommitBox s={s} /> });
+  } else if (s.phase === "conflict") {
+    panes.push({ key: "restore", node: <ConflictPanel s={s} /> });
   } else {
     panes.push({ key: "restore", node: <RestorePanel s={s} /> });
   }
@@ -307,7 +309,7 @@ function RestorePanel({ s }: { s: Scenario }) {
               남겨 뒀으니 필요하면 다시 꺼내볼 수 있어요.
             </div>
           </div>
-          <Primary onClick={s.finish}>테스트 마치기</Primary>
+          <Primary onClick={s.goConflict}>다음 상황으로 (팀원과 충돌)</Primary>
         </div>
       </Panel>
     );
@@ -340,6 +342,84 @@ function RestorePanel({ s }: { s: Scenario }) {
         {step === "restoring" && (
           <div className="flex items-center gap-2 font-mono text-[12px] text-dim">
             <Spin /> 되돌리는 중…
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+/* ---------- 과제 3: 팀원과 충돌 ---------- */
+
+function ConflictPanel({ s }: { s: Scenario }) {
+  const step = s.conflictStep;
+
+  if (step === "merged") {
+    return (
+      <Panel title="합치기 완료" term="pull">
+        <div className="rise space-y-3">
+          <div className="flex items-start gap-2.5">
+            <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-green" />
+            <div className="text-[12px] leading-relaxed text-muted">
+              팀원의 변경과 내 변경을 합쳤어요. 그래프에서 두 갈래가 하나로 이어진 걸 볼 수 있어요. 이제 ‘올리기’를 하면 팀원도 합친 결과를 받을 수 있어요.
+            </div>
+          </div>
+          <Primary onClick={s.finish}>테스트 마치기</Primary>
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="받아오기" term="pull" right={<span className="text-blue">↓ 1개 새로 있음</span>}>
+      <div className="rise space-y-4">
+        <div className="flex items-start gap-2.5 border border-line-soft p-2.5">
+          <ArrowDown size={14} className="mt-0.5 shrink-0 text-blue" />
+          <div className="min-w-0">
+            <div className="text-[12px] text-fg">{DEMO_TEAMMATE.msg}</div>
+            <div className="text-[10px] text-dim">
+              {DEMO_TEAMMATE.author} · 방금 · 파일 1개 ({DEMO_CONFLICT_FILE})
+            </div>
+          </div>
+        </div>
+
+        {step === "incoming" && (
+          <>
+            <p className="text-[12px] leading-relaxed text-muted">
+              팀원이 온라인에 새 저장 지점을 올렸어요. 받아와서 내 작업과 합쳐 볼까요?
+            </p>
+            <button
+              onClick={() => s.demoPull()}
+              className="flex w-full items-center justify-center gap-2 rounded-[3px] bg-blue px-3 py-2 text-[13px] font-semibold text-[#081a33] hover:brightness-110"
+            >
+              <CloudDownload size={15} /> 받아오기 <span className="font-normal opacity-70">· 1개</span>
+            </button>
+          </>
+        )}
+
+        {(step === "failed" || step === "merging") && (
+          <div className="space-y-2 border border-amber/40 bg-amber/5 p-3 text-[12px] leading-relaxed">
+            <div className="flex items-center gap-1.5 font-medium text-amber">
+              <GitMerge size={13} /> {step === "failed" ? "자동으로 합칠 수 없었어요" : "합치는 중이에요"}
+            </div>
+            <p className="text-muted">
+              {step === "failed" ? (
+                <>
+                  나와 팀원이 같은 부분을 서로 다르게 고쳤어요. <span className="text-fg">받아오기를 취소하고 원래 상태로 되돌려 놨어요.</span>
+                </>
+              ) : (
+                "충돌 해결을 마치거나 취소해야 다른 작업을 할 수 있어요."
+              )}
+            </p>
+            <ul className="font-mono text-[11px] text-fg">
+              <li>· {DEMO_CONFLICT_FILE}</li>
+            </ul>
+            <button
+              onClick={s.demoOpenResolver}
+              className="rounded-[3px] bg-amber px-3 py-1.5 text-[12px] font-semibold text-[#2a1a00] hover:brightness-110"
+            >
+              {step === "failed" ? "충돌 해결하기" : "이어서 해결하기"}
+            </button>
           </div>
         )}
       </div>

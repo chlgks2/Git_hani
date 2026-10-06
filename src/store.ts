@@ -1,8 +1,19 @@
 // 시나리오 진행 상태와 액션. 버튼과 터미널 입력이 같은 액션을 호출한다.
 import { useRef, useState } from "react";
-import { BASE_COMMITS, BROKEN, CHANGED_FILES, NEW_HASHES, suggestMessage, type Commit } from "./data";
+import {
+  BASE_COMMITS,
+  BROKEN,
+  CHANGED_FILES,
+  DEMO_CONFLICT_FILE,
+  DEMO_TEAMMATE,
+  NEW_HASHES,
+  suggestMessage,
+  type Commit,
+} from "./data";
 
-export type Phase = "save" | "restore" | "done";
+export type Phase = "save" | "restore" | "conflict" | "done";
+/** 과제 3: incoming 팀원 저장 지점 도착 / failed 받아오기 충돌 / resolving 해결 화면 / merging 해결 중(화면 닫음) / merged 완료 */
+export type ConflictStep = "incoming" | "failed" | "resolving" | "merging" | "merged";
 export type RestoreStep = "broken" | "pick" | "confirm" | "restoring" | "restored";
 
 export type Safety = null | { kind: "commit" } | { kind: "push"; upToId: string; secret: Commit };
@@ -94,7 +105,11 @@ export function useScenario() {
   const [activeId, setActiveId] = useState(() => sessions[0].id);
   const [splitId, setSplitId] = useState<number | null>(null);
 
-  const timers = useRef({ t1Start: Date.now(), firstCommit: 0, firstPush: 0, t2Start: 0, t2End: 0 });
+  const timers = useRef({ t1Start: Date.now(), firstCommit: 0, firstPush: 0, t2Start: 0, t2End: 0, t3Start: 0, t3End: 0 });
+
+  // 과제 3: 팀원과 충돌
+  const [conflictStep, setConflictStep] = useState<ConflictStep>("incoming");
+  const [demoResolved, setDemoResolved] = useState<string | null>(null); // 저장한 결과 파일 내용
   const pendingBlock = useRef<number | null>(null);
 
   /* ---------- 터미널 로그 ---------- */
@@ -390,6 +405,78 @@ export function useScenario() {
     }, 1300);
   };
 
+  /* ---------- 과제 3: 팀원과 충돌 ---------- */
+
+  const goConflict = () => {
+    timers.current.t3Start = Date.now();
+    setPhase("conflict");
+    setConflictStep("incoming");
+    setDemoResolved(null);
+    log({
+      title: "온라인 확인",
+      git: "git fetch",
+      lines: [
+        { tone: "warn", text: `${DEMO_TEAMMATE.author} 님이 온라인에 새 저장 지점을 올렸어요` },
+        { tone: "dim", text: `  ${DEMO_TEAMMATE.hash}  ${DEMO_TEAMMATE.msg}` },
+      ],
+    });
+  };
+
+  const demoPull = (typed?: string) => {
+    if (phase !== "conflict" || conflictStep !== "incoming") return;
+    setConflictStep("failed");
+    log({
+      title: typed ?? "받아오기 (취소됨)",
+      typed: !!typed,
+      git: "git pull",
+      lines: [
+        { tone: "warn", text: "같은 부분을 서로 다르게 고쳐서 자동으로 합칠 수 없었어요" },
+        { tone: "ok", text: "받아오기를 취소하고 원래 상태로 되돌려 놨어요. 내 파일은 그대로예요" },
+        { tone: "dim", text: `  충돌  ${DEMO_CONFLICT_FILE}` },
+      ],
+    });
+  };
+
+  const demoOpenResolver = () => {
+    if (conflictStep === "failed") {
+      log({
+        title: "충돌 해결 시작",
+        git: "git merge origin/main",
+        lines: [{ tone: "warn", text: `충돌 파일 1개 — 화면에서 어떤 내용을 남길지 골라 주세요` }],
+      });
+    }
+    setConflictStep("resolving");
+  };
+
+  const demoSaveFile = (content: string, note: string) => {
+    setDemoResolved(content);
+    log({ title: "충돌 해결", git: `git add ${DEMO_CONFLICT_FILE}`, lines: [{ tone: "ok", text: `${DEMO_CONFLICT_FILE} — ${note}` }] });
+  };
+
+  const demoAbort = () => {
+    setConflictStep("failed");
+    setDemoResolved(null);
+    log({
+      title: "합치기 취소",
+      git: "git merge --abort",
+      lines: [{ tone: "ok", text: "합치기를 취소하고 받아오기 전 상태로 되돌렸어요. 내 파일은 그대로예요" }],
+    });
+  };
+
+  const demoFinish = () => {
+    if (!demoResolved) return;
+    timers.current.t3End = Date.now();
+    setConflictStep("merged");
+    log({
+      title: "합치기 완료",
+      git: "git commit --no-edit",
+      lines: [
+        { tone: "ok", text: "충돌을 모두 해결하고 합친 저장 지점을 만들었어요 · 2f8b6a1" },
+        { tone: "dim", text: "합친 결과는 아직 온라인에 없어요. ‘올리기’로 올리면 팀원도 받을 수 있어요" },
+      ],
+    });
+  };
+
   /* ---------- 그래프 행 ---------- */
 
   let commits: Commit[];
@@ -409,6 +496,25 @@ export function useScenario() {
           ...history,
         ]
       : history;
+  } else if (phase === "conflict" || (phase === "done" && conflictStep === "merged")) {
+    // 팀원 저장 지점은 온라인(origin)에 있다. 합치면 두 갈래를 잇는 합친 저장 지점이 생긴다
+    const mate: Commit = {
+      id: "mate",
+      hash: DEMO_TEAMMATE.hash,
+      msg: `${DEMO_TEAMMATE.author}: ${DEMO_TEAMMATE.msg}`,
+      when: "방금",
+      lane: 1,
+      parents: [origin.id],
+      preview: "after",
+    };
+    const merging = conflictStep === "resolving" || conflictStep === "merging";
+    const top: Commit[] =
+      conflictStep === "merged"
+        ? [{ id: "merge", hash: "2f8b6a1", msg: "Merge remote-tracking branch 'origin/main'", when: "방금", lane: 0, parents: [head.id, "mate"], preview: "after", local: true }]
+        : merging
+          ? [{ id: "wip", hash: "", msg: "합치는 중 · 충돌 1개", when: "지금", lane: 0, parents: [head.id], preview: "after", kind: "wip" }]
+          : [];
+    commits = [...top, mate, ...history];
   } else if (restoreStep === "restored" && backupParent) {
     commits = [
       {
@@ -547,6 +653,10 @@ export function useScenario() {
           : { tone: "ok", text: "온라인(GitHub)과 같은 상태예요" },
       ]);
     }
+    if (has("pull", "받아") && phase === "conflict") {
+      if (conflictStep === "incoming") return demoPull(text);
+      return say([{ tone: "dim", text: "이미 받아오기를 시도했어요. 오른쪽에서 충돌을 해결해 주세요." }]);
+    }
     if (has("pull", "받아", "branch", "브랜치", "merge")) {
       return say([{ tone: "dim", text: "이 기능은 이번 프로토타입에 포함되지 않았어요." }]);
     }
@@ -576,27 +686,40 @@ export function useScenario() {
     setSelectedId(null);
     setRestoredTo(null);
     setBackupParent(null);
+    setConflictStep("incoming");
+    setDemoResolved(null);
     const s = welcomeSession();
     setSessions([s]);
     setActiveId(s.id);
     setSplitId(null);
     pendingBlock.current = null;
-    timers.current = { t1Start: Date.now(), firstCommit: 0, firstPush: 0, t2Start: 0, t2End: 0 };
+    timers.current = { t1Start: Date.now(), firstCommit: 0, firstPush: 0, t2Start: 0, t2End: 0, t3Start: 0, t3End: 0 };
   };
 
-  const changeCount = phase === "save" ? pending.length : restoreStep !== "restored" ? BROKEN.files.length : 0;
+  const changeCount =
+    phase === "save"
+      ? pending.length
+      : phase === "conflict"
+        ? conflictStep === "resolving" || conflictStep === "merging" ? 1 : 0
+        : restoreStep !== "restored" ? BROKEN.files.length : 0;
 
   return {
     phase, restoreStep, selectedId, restoredTo,
     pending, checked, analyzed, analyzing, message, setMessage, description, setDescription,
     local, unpushed, envIgnored, envChoice, safety, pushing, canCommit, canNext,
-    commits, headId: head.id, originId: origin.id, preview, previewLabel, changeCount, timers,
+    commits,
+    // 합친 뒤에는 합친 저장 지점이 지금 위치
+    headId: conflictStep === "merged" && (phase === "conflict" || phase === "done") ? "merge" : head.id,
+    // 과제 3 에서는 팀원 저장 지점이 온라인(GitHub)의 마지막 위치
+    originId: phase === "conflict" || (phase === "done" && conflictStep === "merged") ? "mate" : origin.id, preview, previewLabel, changeCount, timers,
     sessions, activeId, setActiveId, splitId,
     analyze, suggest, toggleFile, toggleAll, commit, resolveCommitSafety, cancelSafety, push,
     goBroken, openPick, pick,
     askConfirm: () => setRestoreStep("confirm"),
     cancelConfirm: () => setRestoreStep("pick"),
     doRestore, finish: () => setPhase("done"), reset,
+    conflictStep, demoResolved, goConflict, demoPull, demoOpenResolver, demoSaveFile, demoAbort, demoFinish,
+    demoCloseResolver: () => setConflictStep("merging"),
     newSession, closeSession, toggleSplit, runInput,
   };
 }

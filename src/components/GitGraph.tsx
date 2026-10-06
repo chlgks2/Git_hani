@@ -1,7 +1,7 @@
 // GitKraken 스타일 커밋 그래프. 레인(갈래)별 색, 갈라짐/합침 곡선, 갈래 라벨.
 import { useMemo, useState } from "react";
 import { ArrowUp, Check, Cloud, GitBranch, LifeBuoy } from "lucide-react";
-import { BROKEN, DEMO_STATS, demoStatsFor, LANE_COLORS, type Commit } from "../data";
+import { BROKEN, DEMO_STATS, DEMO_TEAMMATE, demoStatsFor, LANE_COLORS, type Commit } from "../data";
 import { buildInsights } from "../graphInsights";
 import type { Scenario } from "../store";
 import CommitCard, { type CardData } from "./CommitCard";
@@ -220,7 +220,7 @@ export default function GitGraph({ s }: { s: Scenario }) {
         : {
             short: c.hash,
             subject: c.msg,
-            author: "나",
+            author: c.id === "mate" ? DEMO_TEAMMATE.author : "나",
             when: c.when,
             color: col,
             events: [

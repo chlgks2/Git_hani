@@ -43,9 +43,9 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
           icon={CloudDownload}
           label="받아오기"
           git="pull"
-          onClick={real ? () => r.pull() : undefined}
-          active={!!real && r.incoming.length > 0 && !r.pulling}
-          badge={(real && r.incoming.length) || undefined}
+          onClick={real ? () => r.pull() : () => s.demoPull()}
+          active={real ? r.incoming.length > 0 && !r.pulling : s.phase === "conflict" && s.conflictStep === "incoming"}
+          badge={(real ? r.incoming.length : s.phase === "conflict" && s.conflictStep === "incoming" ? 1 : 0) || undefined}
         />
         <Tool icon={CloudUpload} label="올리기" git="push" onClick={real ? () => r.push() : () => s.push()}
           active={real ? r.unpushed.length > 0 && !r.pushing : canPush}

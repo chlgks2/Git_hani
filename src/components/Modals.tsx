@@ -133,6 +133,7 @@ export function DoneModal({ s }: { s: Scenario }) {
     ],
     ["앞으로 자동 제외 (.gitignore)", s.envIgnored ? "예" : "아니오"],
     ["과제 2 · 되돌리기까지 걸린 시간", sec(t.t2Start, t.t2End)],
+    ["과제 3 · 충돌 해결까지 걸린 시간", sec(t.t3Start, t.t3End)],
   ];
   return (
     <Shell accent="var(--color-green)">

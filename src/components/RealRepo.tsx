@@ -4,12 +4,15 @@ import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload,
 import {
   gitCommit,
   gitAbortMerge,
+  gitConflictFile,
   gitFetch,
   gitFinishMerge,
   gitIncoming,
   gitLog,
   gitPull,
   gitPush,
+  gitResolveFile,
+  gitResolveWhole,
   gitRestorePreview,
   gitRestoreTo,
   gitStartMerge,
@@ -31,7 +34,8 @@ import {
   type UnpushedCommit,
 } from "../git";
 import type { Block } from "../store";
-import { aiCommitMessage, aiHealth, aiSummarize, collectPatches, type AiState, type Summary } from "../ai";
+import { aiCommitMessage, aiExplainConflict, aiHealth, aiSummarize, collectPatches, type AiState, type Summary } from "../ai";
+import type { ResolverBackend } from "./ConflictResolver";
 import RealGraph from "./RealGraph";
 import Splitter, { clamp } from "./Splitter";
 import { BlockView } from "./Terminal";
@@ -575,6 +579,33 @@ export function useRealRepo() {
 }
 
 export type RealRepo = ReturnType<typeof useRealRepo>;
+
+/** 충돌 해결 화면을 실제 git 명령으로 움직이게 연결한다 */
+export function realResolverBackend(r: RealRepo): ResolverBackend {
+  const repo = r.repo!;
+  return {
+    oursLabel: repo.branch ?? "내 갈래",
+    theirsLabel: repo.upstream ?? "온라인",
+    all: r.mergeFiles,
+    // 남은 충돌 파일은 항상 git 상태(U)에서 읽는다 — 해결하면 목록에서 빠진다
+    remaining: repo.files.filter((f) => f.status === "U").map((f) => f.path),
+    load: (file) => gitConflictFile(repo.root, file),
+    saveFile: async (file, content, note) => {
+      await gitResolveFile(repo.root, file, content);
+      r.noteResolved(file, note);
+      await r.reload();
+    },
+    chooseWhole: async (file, side, note) => {
+      await gitResolveWhole(repo.root, file, side);
+      r.noteResolved(file, note);
+      await r.reload();
+    },
+    explain: aiExplainConflict,
+    abort: r.abortMerge,
+    finish: r.finishMerge,
+    close: r.closeResolver,
+  };
+}
 
 function statusBlock(st: RepoStatus, title: string): Omit<Block, "id"> {
   const lines: Block["lines"] = [];

@@ -3,9 +3,37 @@
 // 이 화면은 그 부분을 "내 것 / 온라인 것" 카드로 보여주고, 버튼으로 고르면 기호 없이 깔끔한 파일을 만들어 준다.
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronRight, Code2, FileWarning, GitMerge, Sparkles, X } from "lucide-react";
-import { aiExplainConflict, type ConflictExplanation } from "../ai";
-import { gitConflictFile, gitResolveFile, gitResolveWhole, type ConflictFile, type Segment } from "../git";
-import type { RealRepo } from "./RealRepo";
+import type { ConflictExplanation } from "../ai";
+import type { ConflictFile, Segment } from "../git";
+
+/**
+ * 충돌 해결 화면이 필요로 하는 것들. 실제 저장소(git 명령)와 웹 데모(미리 준비한 데이터)가 각자 채워 넣는다.
+ * 화면은 하나로 두고 뒤에서 하는 일만 바꿔 끼우는 방식이다.
+ */
+export interface ResolverBackend {
+  oursLabel: string;
+  theirsLabel: string;
+  /** 처음 충돌 났던 파일 전체 (진행률 표시용) */
+  all: string[];
+  /** 아직 해결하지 않은 파일 */
+  remaining: string[];
+  load(file: string): Promise<ConflictFile>;
+  saveFile(file: string, content: string, note: string): Promise<void>;
+  chooseWhole(file: string, side: "ours" | "theirs", note: string): Promise<void>;
+  explain(req: {
+    path: string;
+    oursLabel: string;
+    theirsLabel: string;
+    ours: string;
+    theirs: string;
+    base: string | null;
+    before: string;
+    after: string;
+  }): Promise<ConflictExplanation>;
+  abort(): void;
+  finish(): void;
+  close(): void;
+}
 
 type Choice = "ours" | "theirs" | "oursFirst" | "theirsFirst";
 
@@ -29,11 +57,8 @@ function pick(seg: Extract<Segment, { kind: "conflict" }>, c: Choice) {
   return join(seg.theirs, seg.ours);
 }
 
-export default function ConflictResolver({ r }: { r: RealRepo }) {
-  const repo = r.repo!;
-  // 남은 충돌 파일은 항상 git 상태(U)에서 읽는다 — 해결하면 목록에서 빠진다
-  const remaining = repo.files.filter((f) => f.status === "U").map((f) => f.path);
-  const all = r.mergeFiles; // 처음 충돌 났던 파일 전체 (진행률 표시용)
+export default function ConflictResolver({ backend: b }: { backend: ResolverBackend }) {
+  const { remaining, all } = b;
   const [current, setCurrent] = useState<string | null>(remaining[0] ?? null);
   const [cf, setCf] = useState<ConflictFile | null>(null);
   const [choices, setChoices] = useState<Record<number, Choice>>({});
@@ -57,8 +82,8 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     setShowRaw(false);
     setError(null);
     if (!current) return;
-    gitConflictFile(repo.root, current).then(setCf).catch((e) => setError(String(e)));
-  }, [current, repo.root]);
+    b.load(current).then(setCf).catch((e) => setError(String(e)));
+  }, [current]); // b 는 화면이 다시 그려질 때마다 새로 만들어지므로 넣지 않는다
 
   const conflicts = useMemo(
     () => (cf?.segments ?? []).flatMap((s, i) => (s.kind === "conflict" ? [i] : [])),
@@ -79,7 +104,7 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     };
     setExplain((m) => ({ ...m, [i]: "loading" }));
     try {
-      const res = await aiExplainConflict({
+      const res = await b.explain({
         path: current,
         oursLabel: ours,
         theirsLabel: theirs,
@@ -101,9 +126,7 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     setBusy(true);
     setError(null);
     try {
-      await gitResolveFile(repo.root, current, content);
-      r.noteResolved(current, `${conflicts.length}곳 골라서 저장`);
-      await r.reload();
+      await b.saveFile(current, content, `${conflicts.length}곳 골라서 저장`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -116,9 +139,7 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     setBusy(true);
     setError(null);
     try {
-      await gitResolveWhole(repo.root, current, side);
-      r.noteResolved(current, what);
-      await r.reload();
+      await b.chooseWhole(current, side, what);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -126,8 +147,8 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
     }
   };
 
-  const ours = repo.branch ?? "내 갈래";
-  const theirs = repo.upstream ?? "온라인";
+  const ours = b.oursLabel;
+  const theirs = b.theirsLabel;
   const done = all.length - remaining.length;
 
   return (
@@ -147,7 +168,7 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
             {done}/{all.length} 파일 해결
           </span>
           <button
-            onClick={r.abortMerge}
+            onClick={b.abort}
             disabled={busy}
             className="rounded-[3px] border border-line px-3 py-1.5 text-[12px] text-muted hover:border-red/50 hover:text-red disabled:opacity-40"
             title="고른 것을 모두 버리고 받아오기 전 상태로 돌아가요"
@@ -155,13 +176,13 @@ export default function ConflictResolver({ r }: { r: RealRepo }) {
             합치기 취소
           </button>
           <button
-            onClick={r.finishMerge}
+            onClick={b.finish}
             disabled={busy || remaining.length > 0}
             className="flex items-center gap-1.5 rounded-[3px] bg-teal px-3 py-1.5 text-[12px] font-semibold text-[#0b2626] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
           >
             <Check size={13} /> 합치기 완료
           </button>
-          <button onClick={r.closeResolver} className="text-dim hover:text-fg" title="닫기 (합치기는 계속 진행 중으로 남아요)">
+          <button onClick={b.close} className="text-dim hover:text-fg" title="닫기 (합치기는 계속 진행 중으로 남아요)">
             <X size={16} />
           </button>
         </div>

@@ -169,6 +169,8 @@ export const DEMO_STATS: Record<string, { path: string; added: number | null; de
     { path: "README.md", added: 4, deleted: 0 },
     { path: "assets/logo.png", added: null, deleted: null },
   ],
+  mate: [{ path: "menu.js", added: 2, deleted: 2 }],
+  merge: [{ path: "menu.js", added: 1, deleted: 1 }],
   revert: [
     { path: "menu.js", added: 4, deleted: 2 },
     { path: "data.json", added: 1, deleted: 1 },
@@ -199,4 +201,57 @@ export const BASE_COMMITS: Commit[] = [
 ];
 
 // 새로 만드는 커밋에 차례로 붙일 해시
+/* ---------- 과제 3: 팀원과 충돌 ---------- */
+
+export const DEMO_TEAMMATE = { hash: "5c1d0e9", msg: "시즌 메뉴를 단호박 라떼로 교체, 공지 문구 수정", author: "팀원(지수)" };
+export const DEMO_CONFLICT_FILE = "menu.js";
+
+/** 충돌 파일을 조각으로 (실제 앱이 git 충돌 표시를 해석한 결과와 같은 모양) */
+export const DEMO_CONFLICT_SEGMENTS = [
+  { kind: "same" as const, text: 'const menu = ["아메리카노", "카페라떼"];\n' },
+  {
+    kind: "conflict" as const,
+    ours: 'const season = ["밤 라떼", "고구마 라떼", "애플 시나몬티"];\n',
+    theirs: 'const season = ["밤 라떼", "고구마 라떼", "단호박 라떼"];\n',
+    base: null,
+  },
+  { kind: "same" as const, text: "renderList('menu-list', menu);\nrenderList('season-list', season);\n\n" },
+  {
+    kind: "conflict" as const,
+    ours: 'const notice = "가을 시즌 음료가 나왔어요!";\n',
+    theirs: 'const notice = "가을 한정 메뉴를 만나보세요";\n',
+    base: null,
+  },
+  { kind: "same" as const, text: "showNotice(notice);\n" },
+];
+
+/** Git 이 파일에 써 넣는 그대로의 모습 (<<<<<<< 기호 포함) */
+export const DEMO_CONFLICT_RAW = DEMO_CONFLICT_SEGMENTS.map((s) =>
+  s.kind === "same" ? s.text : `<<<<<<< HEAD\n${s.ours}=======\n${s.theirs}>>>>>>> origin/main\n`,
+).join("");
+
+/** 데모용 AI 설명 (웹 데모에는 AI 서버가 없어서 미리 준비한 답) */
+export const DEMO_CONFLICT_AI: Record<string, {
+  summary: string;
+  ours: string;
+  theirs: string;
+  recommendation: "ours" | "theirs" | "oursFirst" | "theirsFirst" | "manual";
+  reason: string;
+}> = {
+  season: {
+    summary: "가을 시즌 음료 목록의 세 번째 메뉴를 서로 다르게 바꿨어요.",
+    ours: "세 번째 메뉴로 애플 시나몬티를 보여줘요",
+    theirs: "세 번째 메뉴로 단호박 라떼를 보여줘요",
+    recommendation: "manual",
+    reason: "둘 다 쓰면 목록이 두 번 선언돼 코드가 깨져요. 메뉴를 정하는 일이라 팀원과 상의해서 하나를 고르는 게 좋아요.",
+  },
+  notice: {
+    summary: "메뉴 페이지 위쪽 공지 문구를 서로 다르게 고쳤어요.",
+    ours: "\"가을 시즌 음료가 나왔어요!\" 라고 알려줘요",
+    theirs: "\"가을 한정 메뉴를 만나보세요\" 라고 알려줘요",
+    recommendation: "theirs",
+    reason: "‘한정’이라는 말이 시즌 메뉴라는 점을 더 잘 보여줘요. 둘 다 쓰면 공지가 두 번 선언돼 코드가 깨져요.",
+  },
+};
+
 export const NEW_HASHES = ["3be71d5", "8c2f0a9", "d61e4b7", "5a90c3e", "b17d2f6", "e4c8a01", "71fd93b"];

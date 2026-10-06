@@ -7,6 +7,20 @@ export interface FileChange {
   status: "A" | "M" | "D" | "R" | "U";
   code: string;
   staged: boolean;
+  /** 이름이 바뀐 파일의 원래 이름 */
+  origPath: string | null;
+}
+
+export interface CommitInfo {
+  hash: string;
+  short: string;
+  parents: string[];
+  author: string;
+  /** 저장한 시각 (초) */
+  time: number;
+  /** 예: "HEAD -> refs/heads/main", "refs/remotes/origin/main", "tag: refs/tags/v1" */
+  refs: string[];
+  subject: string;
 }
 
 export interface RepoStatus {
@@ -24,6 +38,44 @@ export const isDesktop = () => "__TAURI_INTERNALS__" in window;
 
 export function gitStatus(path: string) {
   return invoke<RepoStatus>("git_status", { path });
+}
+
+export function gitLog(path: string, limit = 300) {
+  return invoke<CommitInfo[]>("git_log", { path, limit });
+}
+
+export function gitCommit(path: string, files: string[], message: string, description: string) {
+  return invoke<{ hash: string; short: string }>("git_commit", {
+    path,
+    files,
+    message,
+    description: description.trim() || null,
+  });
+}
+
+/** 비밀 정보가 들어 있을 가능성이 큰 파일 이름 */
+const SECRET_PATTERNS = [
+  /^\.env(\..+)?$/, // .env, .env.local …
+  /\.(pem|key|p12|pfx|keystore|jks)$/, // 인증서·개인 키
+  /^id_(rsa|ed25519|ecdsa|dsa)$/, // SSH 개인 키
+  /(credentials|secrets?)\.(json|ya?ml|txt)$/,
+];
+const SAFE_EXAMPLE = /\.(example|sample|template)$/; // .env.example 같은 예시 파일은 괜찮다
+
+export function looksSecret(path: string) {
+  const name = path.split("/").pop()!.toLowerCase();
+  return !SAFE_EXAMPLE.test(name) && SECRET_PATTERNS.some((re) => re.test(name));
+}
+
+/** 초 단위 시각을 "3분 전" 같은 말로 */
+export function timeAgo(sec: number) {
+  const d = Date.now() / 1000 - sec;
+  if (d < 60) return "방금";
+  if (d < 3600) return `${Math.floor(d / 60)}분 전`;
+  if (d < 86400) return `${Math.floor(d / 3600)}시간 전`;
+  if (d < 86400 * 7) return `${Math.floor(d / 86400)}일 전`;
+  const t = new Date(sec * 1000);
+  return `${t.getFullYear()}.${t.getMonth() + 1}.${t.getDate()}`;
 }
 
 /** 폴더 선택 창을 띄운다. 취소하면 null */

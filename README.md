@@ -1,5 +1,8 @@
 # Git GUI
 
+[![CI](https://github.com/chlgks2/Git_hani/actions/workflows/ci.yml/badge.svg)](https://github.com/chlgks2/Git_hani/actions/workflows/ci.yml)
+[![웹 데모](https://img.shields.io/badge/웹_데모-열기-2ec4c4)](https://chlgks2.github.io/Git_hani/)
+
 Git을 잘 모르는 사람도 바뀐 내용을 확인하고, 저장(커밋)하고, 온라인에 올리고(푸시), 예전 상태로 되돌릴 수 있도록 돕는 데스크톱 Git 클라이언트입니다.
 
 ## 현재 상태
@@ -72,6 +75,9 @@ npm run tauri build
 # AI 서버 켜기 (처음 한 번: server/.env 에 ANTHROPIC_API_KEY 설정, server/README.md 참고)
 npm run ai
 ```
+
+push 할 때마다 GitHub Actions 가 아래 테스트를 자동으로 실행합니다 (`.github/workflows/ci.yml`).
+Rust 테스트는 Windows·macOS·Linux 세 환경에서 모두 돌립니다.
 
 Rust 단위 테스트:
 

@@ -1217,8 +1217,10 @@ mod tests {
     fn reads_this_repository() {
         // src-tauri 폴더에서 시작해도 저장소 맨 위(Git_hani)를 찾아야 한다
         let st = status(env!("CARGO_MANIFEST_DIR")).expect("git status 실패");
-        assert_eq!(st.name, "Git_hani");
-        assert!(st.branch.is_some());
+        // 맨 위 폴더는 src-tauri 의 부모여야 한다 (폴더 이름은 내려받은 위치에 따라 다를 수 있다)
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().file_name().unwrap();
+        assert_eq!(st.name, parent.to_string_lossy());
+        // 갈래 이름은 확인하지 않는다 — CI 의 Pull Request 검사는 갈래가 아닌 저장 지점에서 실행된다
     }
 
     #[test]

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 같은 갈래에 새로 push 하면 앞선 검사는 취소
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 데스크톱 앱의 git 처리 (Rust) — Windows·macOS·Linux 에서 모두 컴파일되고 통과하는지
+  rust:
+    name: Rust 테스트 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux 에서 Tauri 가 쓰는 시스템 라이브러리 설치
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Tauri 는 컴파일할 때 화면 빌드 결과(dist)를 앱 안에 넣으므로 먼저 만든다
+      - name: 화면 빌드
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 테스트용 git 사용자 설정
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  # 화면 (React + TypeScript)
+  frontend:
+    name: 화면 타입 검사·빌드
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build # tsc -b 타입 검사 + vite 빌드
+
+  # AI 서버 (NestJS)
+  server:
+    name: AI 서버 테스트
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: 단위 테스트
+        run: npm test
+      - name: e2e 테스트
+        run: npm run test:e2e

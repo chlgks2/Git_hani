@@ -6,6 +6,7 @@ import type { Scenario } from "../store";
 import SitePreview from "./SitePreview";
 import Splitter, { clamp } from "./Splitter";
 import { GitChip } from "./Term";
+import { AI_ENABLED, AI_SOON } from "../features";
 
 type PaneKey = "changes" | "commit" | "restore" | "push";
 const DEFAULT_H: Record<PaneKey, number> = { changes: 250, commit: 240, restore: 330, push: 210 };
@@ -97,11 +98,12 @@ function ChangesPanel({ s }: { s: Scenario }) {
           {!s.analyzed && (
             <button
               onClick={() => s.analyze()}
-              disabled={s.analyzing}
+              disabled={!AI_ENABLED || s.analyzing}
+              title={AI_ENABLED ? undefined : AI_SOON}
               className="flex w-full items-center justify-center gap-1.5 rounded-[3px] border border-[#b9a6f5]/30 py-1.5 text-[12px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-60"
             >
               {s.analyzing ? <Spin /> : <Sparkles size={13} />}
-              {s.analyzing ? "AI가 읽고 있어요…" : "무엇이 바뀌었는지 쉬운 말로 설명 듣기"}
+              {!AI_ENABLED ? "AI 설명 (준비 중)" : s.analyzing ? "AI가 읽고 있어요…" : "무엇이 바뀌었는지 쉬운 말로 설명 듣기"}
             </button>
           )}
           <p className="text-[11px] leading-relaxed text-dim">체크한 파일만 이번 저장에 들어가요. 나눠서 여러 번 저장해도 돼요.</p>
@@ -168,10 +170,11 @@ function CommitBox({ s }: { s: Scenario }) {
           />
           <button
             onClick={s.suggest}
-            disabled={!n || s.analyzing}
+            disabled={!AI_ENABLED || !n || s.analyzing}
+            title={AI_ENABLED ? undefined : AI_SOON}
             className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1 rounded-[3px] px-1.5 py-1 text-[11px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-40"
           >
-            {s.analyzing ? <Spin /> : <Sparkles size={11} />} AI 추천
+            {s.analyzing ? <Spin /> : <Sparkles size={11} />} {AI_ENABLED ? "AI 추천" : "AI 준비 중"}
           </button>
         </div>
         <textarea
@@ -187,7 +190,7 @@ function CommitBox({ s }: { s: Scenario }) {
           <span className="font-normal opacity-70">· 파일 {n}개</span>
         </Primary>
         <p className="text-[11px] text-dim">
-          {!n ? "저장할 파일을 하나 이상 체크해 주세요." : !s.message.trim() ? "메시지를 적거나 ‘AI 추천’을 눌러보세요." : "내 컴퓨터에 저장 지점이 만들어져요. 온라인에는 ‘올리기’로 올려요."}
+          {!n ? "저장할 파일을 하나 이상 체크해 주세요." : !s.message.trim() ? (AI_ENABLED ? "메시지를 적거나 ‘AI 추천’을 눌러보세요." : "무엇을 바꿨는지 짧게 적어 주세요.") : "내 컴퓨터에 저장 지점이 만들어져요. 온라인에는 ‘올리기’로 올려요."}
         </p>
       </div>
     </Panel>

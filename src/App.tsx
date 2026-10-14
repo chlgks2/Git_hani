@@ -13,6 +13,7 @@ import { demoResolverBackend } from "./demoResolver";
 import ConflictResolver from "./components/ConflictResolver";
 import DiffViewer from "./components/DiffViewer";
 import { isDesktop } from "./git";
+import { AI_ENABLED } from "./features";
 
 export default function App() {
   const s = useScenario();
@@ -110,7 +111,11 @@ export default function App() {
             return <span className={n ? "text-amber" : ""}>{n ? `● ${n} 변경` : "✓ 깨끗함"}</span>;
           })()}
           {!real && <span className="text-dim">데모</span>}
-          {!real ? (
+          {!AI_ENABLED ? (
+            <span className="flex items-center gap-1 text-dim" title="AI 기능은 준비 중이에요">
+              <Sparkles size={10} /> AI 도우미 준비 중
+            </span>
+          ) : !real ? (
             <span className="flex items-center gap-1 text-[#b9a6f5]">
               <Sparkles size={10} /> AI 도우미 연결됨
             </span>

@@ -36,6 +36,7 @@ import {
 import type { Block } from "../store";
 import { aiCommitMessage, aiExplainConflict, aiHealth, aiSummarize, collectPatches, type AiState, type Summary } from "../ai";
 import type { ResolverBackend } from "./ConflictResolver";
+import { AI_ENABLED, AI_SOON } from "../features";
 import RealGraph from "./RealGraph";
 import Splitter, { clamp } from "./Splitter";
 import { BlockView } from "./Terminal";
@@ -139,6 +140,7 @@ export function useRealRepo() {
   /* ---------- AI ---------- */
 
   const checkAi = async () => {
+    if (!AI_ENABLED) return "unknown" as AiState; // AI 를 꺼 둔 동안에는 서버에 묻지 않는다
     const st = await aiHealth();
     setAiState(st);
     return st;
@@ -146,7 +148,7 @@ export function useRealRepo() {
 
   /** 바뀐 파일들을 AI 가 쉬운 말로 설명한다 (비밀 정보 파일은 보내지 않음) */
   const explainChanges = async () => {
-    if (!repo || summarizing) return;
+    if (!AI_ENABLED || !repo || summarizing) return;
     setSummarizing(true);
     setAiError(null);
     try {
@@ -175,7 +177,7 @@ export function useRealRepo() {
 
   /** 체크한 파일로 저장 메시지를 추천받아 칸에 채운다 */
   const suggestMessage = async () => {
-    if (!repo || suggesting) return;
+    if (!AI_ENABLED || !repo || suggesting) return;
     const picked = repo.files.filter((f) => checkedRef.current.has(f.path));
     if (!picked.length) return;
     setSuggesting(true);
@@ -801,13 +803,20 @@ export function RealInspector({ r }: { r: RealRepo }) {
             )}
             <button
               onClick={r.explainChanges}
-              disabled={r.summarizing}
+              disabled={!AI_ENABLED || r.summarizing}
+              title={AI_ENABLED ? undefined : AI_SOON}
               className="flex w-full items-center justify-center gap-1.5 rounded-[3px] border border-[#b9a6f5]/30 py-1.5 text-[12px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-60"
             >
               {r.summarizing ? <Spin /> : <Sparkles size={13} />}
-              {r.summarizing ? "AI 가 읽고 있어요…" : r.summary ? "다시 설명 듣기" : "무엇이 바뀌었는지 쉬운 말로 설명 듣기"}
+              {!AI_ENABLED
+                ? "AI 설명 (준비 중)"
+                : r.summarizing
+                  ? "AI 가 읽고 있어요…"
+                  : r.summary
+                    ? "다시 설명 듣기"
+                    : "무엇이 바뀌었는지 쉬운 말로 설명 듣기"}
             </button>
-            <AiNotice r={r} />
+            {AI_ENABLED && <AiNotice r={r} />}
           </div>
         )}
 
@@ -839,11 +848,11 @@ export function RealInspector({ r }: { r: RealRepo }) {
                 />
                 <button
                   onClick={r.suggestMessage}
-                  disabled={!n || r.suggesting}
-                  title="체크한 파일의 변경을 보고 저장 메시지를 추천해요"
+                  disabled={!AI_ENABLED || !n || r.suggesting}
+                  title={AI_ENABLED ? "체크한 파일의 변경을 보고 저장 메시지를 추천해요" : AI_SOON}
                   className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1 rounded-[3px] px-1.5 py-1 text-[11px] text-[#b9a6f5] hover:bg-[#b9a6f5]/10 disabled:opacity-40"
                 >
-                  {r.suggesting ? <Spin /> : <Sparkles size={11} />} AI 추천
+                  {r.suggesting ? <Spin /> : <Sparkles size={11} />} {AI_ENABLED ? "AI 추천" : "AI 준비 중"}
                 </button>
               </div>
               <textarea

@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronRight, Code2, FileWarning, GitMerge, Sparkles, X } from "lucide-react";
 import type { ConflictExplanation } from "../ai";
+import { AI_ENABLED, AI_SOON } from "../features";
 import type { ConflictFile, Segment } from "../git";
 
 /**
@@ -344,10 +345,11 @@ function ConflictBlock({
           {!ai && (
             <button
               onClick={onAskAi}
-              disabled={explain === "loading"}
+              disabled={!AI_ENABLED || explain === "loading"}
+              title={AI_ENABLED ? undefined : AI_SOON}
               className="flex items-center gap-1 text-[11px] text-[#b9a6f5] hover:underline disabled:opacity-60"
             >
-              <Sparkles size={11} /> {explain === "loading" ? "AI 가 읽고 있어요…" : "AI 설명 듣기"}
+              <Sparkles size={11} /> {!AI_ENABLED ? "AI 설명 (준비 중)" : explain === "loading" ? "AI 가 읽고 있어요…" : "AI 설명 듣기"}
             </button>
           )}
         </span>

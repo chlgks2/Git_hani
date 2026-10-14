@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Columns2, FileDiff, Folder, GitBranch, Plus, SquareTerminal, X } from "lucide-react";
 import { REPO_PATH } from "../data";
 import type { Block, LineTone, Scenario, Session } from "../store";
+import { AI_ENABLED } from "../features";
 
 const TONE: Record<LineTone, string> = {
   plain: "text-fg/90",
@@ -69,7 +70,10 @@ export default function Terminal({ s, height }: { s: Scenario; height: number })
 function suggestions(s: Scenario): string[] {
   if (s.phase === "save") {
     const out: string[] = [];
-    if (s.pending.length) out.push(s.analyzed ? "저장해줘" : "뭐가 바뀌었어?", s.analyzed ? "상태" : "저장해줘");
+    if (s.pending.length) {
+      if (AI_ENABLED) out.push(s.analyzed ? "저장해줘" : "뭐가 바뀌었어?", s.analyzed ? "상태" : "저장해줘");
+      else out.push("저장해줘", "상태");
+    }
     if (s.unpushed.length) out.push("올려줘");
     out.push("기록 보여줘", "도움");
     return out;
@@ -127,7 +131,7 @@ function Pane({ session, s, focused, divider }: { session: Session; s: Scenario;
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onFocus={() => s.setActiveId(session.id)}
-            placeholder="하고 싶은 일을 적어보세요 — 예: 뭐가 바뀌었어?  (git 명령어도 돼요)"
+            placeholder="하고 싶은 일을 적어보세요 — 예: 저장해줘, 올려줘  (git 명령어도 돼요)"
             className="flex-1 bg-transparent font-mono text-[13px] text-fg outline-none placeholder:font-sans placeholder:text-dim"
           />
         </form>

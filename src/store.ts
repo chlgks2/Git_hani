@@ -10,6 +10,7 @@ import {
   suggestMessage,
   type Commit,
 } from "./data";
+import { AI_ENABLED } from "./features";
 
 export type Phase = "save" | "restore" | "conflict" | "done";
 /** 과제 3: incoming 팀원 저장 지점 도착 / failed 받아오기 충돌 / resolving 해결 화면 / merging 해결 중(화면 닫음) / merged 완료 */
@@ -666,7 +667,7 @@ export function useScenario() {
     if (has("도움", "help", "뭘 할 수")) {
       return say([
         { tone: "plain", text: "이렇게 말해보세요:" },
-        { tone: "dim", text: "  · 뭐가 바뀌었어? / 설명해줘     → 변경 내용 설명 (git diff)" },
+        ...(AI_ENABLED ? [{ tone: "dim" as const, text: "  · 뭐가 바뀌었어? / 설명해줘     → 변경 내용 설명 (git diff)" }] : []),
         { tone: "dim", text: "  · 저장해줘                       → 커밋하기 (git commit)" },
         { tone: "dim", text: "  · 올려줘                         → 모두 올리기 (git push)" },
         { tone: "dim", text: "  · 기록 보여줘                    → 저장 기록 (git log)" },
@@ -691,6 +692,11 @@ export function useScenario() {
       const m = text.match(/-m\s+["“']?(.+?)["”']?\s*$/);
       if (m) return commit(text, m[1]);
       if (!message.trim()) {
+        if (!AI_ENABLED)
+          return say([
+            { tone: "plain", text: "오른쪽 ‘저장 메시지’ 칸에 무엇을 바꿨는지 적고 다시 ‘저장해줘’라고 입력하세요." },
+            { tone: "dim", text: '또는 git commit -m "메시지" 처럼 바로 적어도 돼요. (AI 메시지 추천은 준비 중이에요)' },
+          ]);
         say([
           { tone: "ai", text: "오른쪽 메시지 칸에 AI가 추천한 메시지를 넣어둘게요." },
           { tone: "dim", text: "확인하고 ‘커밋하기’를 누르거나, 다시 ‘저장해줘’라고 입력하세요." },
@@ -700,6 +706,10 @@ export function useScenario() {
       return commit(text);
     }
     if (has("설명", "바뀌", "변경", "diff")) {
+      if (!AI_ENABLED)
+        return say([
+          { tone: "dim", text: "쉬운 말 설명(AI)은 준비 중이에요. 오른쪽 파일의 ‘diff’ 를 눌러 바뀐 줄을 볼 수 있어요." },
+        ]);
       if (phase === "save" && pending.length && !analyzed) return analyze(text);
       return say([{ tone: "dim", text: "바뀐 내용 설명은 오른쪽 ‘바뀐 내용’ 패널에 있어요." }]);
     }

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CloudDownload, CloudUpload, FolderOpen, GitBranch, Minus, Redo2, Save, Square, Undo2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CloudDownload, CloudUpload, FolderOpen, GitBranch, Minus, Save, Square, Undo2, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { REPO } from "../data";
 import type { Scenario } from "../store";
@@ -10,8 +10,6 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
   const canCommit = !real && s.canCommit;
   const canPush = !real && s.unpushed.length > 0 && !s.pushing;
   const canRevert = !real && s.phase === "restore" && s.restoreStep === "broken";
-  // 실제 저장소 모드에서는 아직 연결 안 된 버튼이 데모 동작을 하지 않게 막는다
-  const demo = (fn: () => void) => (real ? undefined : fn);
 
   return (
     <div className="flex h-14 shrink-0 items-stretch border-b border-line bg-panel select-none">
@@ -38,7 +36,6 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
           onClick={real ? () => r.restoreShortcut() : () => s.openPick()}
           active={real ? !real.merging && (!!r.selected || real.files.length > 0 || r.commits.length > 1) : canRevert || (s.phase === "save" && s.local.length > 0)}
         />
-        <Tool icon={Redo2} label="다시하기" git="redo" />
         <Tool
           icon={CloudDownload}
           label="받아오기"
@@ -50,8 +47,14 @@ export default function TitleBar({ s, r }: { s: Scenario; r: RealRepo }) {
         <Tool icon={CloudUpload} label="올리기" git="push" onClick={real ? () => r.push() : () => s.push()}
           active={real ? r.unpushed.length > 0 && !r.pushing : canPush}
           badge={(real ? r.unpushed.length : s.unpushed.length) || undefined} />
-        <Tool icon={GitBranch} label="갈래" git="branch" />
-        <Tool icon={Save} label="저장" git="commit" onClick={demo(() => s.commit())} active={canCommit} />
+        {/* 다시하기·갈래는 기능이 준비되면 다시 보여준다 */}
+        <Tool
+          icon={Save}
+          label="저장"
+          git="commit"
+          onClick={real ? () => r.commit() : () => s.commit()}
+          active={real ? !real.merging && r.checked.size > 0 && r.message.trim().length > 0 : canCommit}
+        />
         {/* 브라우저 데모에서만 보이는 창 버튼 장식. 데스크톱 앱은 Windows 기본 창 버튼을 쓴다 */}
         {!isDesktop() && (
         <div className="ml-2 flex items-start border-l border-line text-dim">

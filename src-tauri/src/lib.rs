@@ -1,11 +1,14 @@
 mod commands;
 mod git;
+mod setup;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
     // 폴더 선택 창을 쓰기 위한 플러그인
     .plugin(tauri_plugin_dialog::init())
+    // 브라우저로 링크 열기 (예: GitHub 새 저장소 만들기 페이지)
+    .plugin(tauri_plugin_opener::init())
     // React 에서 invoke("git_status") 로 부를 수 있게 명령을 등록한다
     .invoke_handler(tauri::generate_handler![
       commands::git_status,
@@ -27,6 +30,13 @@ pub fn run() {
       commands::git_restore_preview,
       commands::git_restore_to,
       commands::git_file_diff,
+      commands::git_identity,
+      commands::git_set_identity,
+      commands::git_init,
+      commands::git_clone,
+      commands::git_set_remote,
+      commands::git_ignore_suggestions,
+      commands::git_add_ignore,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

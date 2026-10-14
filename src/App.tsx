@@ -12,6 +12,7 @@ import { RealExplorer, RealInspector, RealMain, realResolverBackend, useRealRepo
 import { demoResolverBackend } from "./demoResolver";
 import ConflictResolver from "./components/ConflictResolver";
 import DiffViewer from "./components/DiffViewer";
+import { IdentityDialog, InitDialog, RemoteDialog, StartScreen } from "./components/SetupModals";
 import { isDesktop } from "./git";
 import { AI_ENABLED } from "./features";
 
@@ -20,6 +21,8 @@ export default function App() {
   const r = useRealRepo();
   const real = r.repo;
   const [termH, setTermH] = useState(340);
+  // 데스크톱 앱은 시작 화면부터 (웹 데모는 바로 데모)
+  const [startOpen, setStartOpen] = useState(isDesktop());
   const startTermH = useRef(0);
   const termSplitter = (
     <Splitter
@@ -48,16 +51,27 @@ export default function App() {
         {real ? (
           <>
             <span className="truncate font-mono text-[11px] text-dim">{real.root}</span>
-            <button onClick={r.close} className="ml-auto flex items-center gap-1 text-[11px] text-muted hover:text-fg">
-              <X size={11} /> 저장소 닫고 데모 보기
+            <button
+              onClick={() => {
+                r.close();
+                setStartOpen(true);
+              }}
+              className="ml-auto flex items-center gap-1 text-[11px] text-muted hover:text-fg"
+            >
+              <X size={11} /> 저장소 닫기
             </button>
           </>
         ) : (
           <>
         {isDesktop() && (
-          <button onClick={r.open} className="flex items-center gap-1 text-[11px] text-teal/80 hover:text-teal">
-            <FolderOpen size={11} /> 내 저장소 열기
-          </button>
+          <>
+            <button onClick={r.open} className="flex items-center gap-1 text-[11px] text-teal/80 hover:text-teal">
+              <FolderOpen size={11} /> 내 저장소 열기
+            </button>
+            <button onClick={() => setStartOpen(true)} className="text-[11px] text-dim hover:text-muted">
+              시작 화면
+            </button>
+          </>
         )}
         {s.phase === "save" && (
           <button
@@ -133,6 +147,15 @@ export default function App() {
         {real && r.resolving && <ConflictResolver backend={realResolverBackend(r)} />}
         {!real && s.phase === "conflict" && s.conflictStep === "resolving" && <ConflictResolver backend={demoResolverBackend(s)} />}
         {real && r.diffFile && !r.resolving && <DiffViewer r={r} />}
+        {!real && startOpen && <StartScreen r={r} onDemo={() => setStartOpen(false)} />}
+        {r.initAsk && <InitDialog r={r} path={r.initAsk} />}
+        {real && r.identityAsk && <IdentityDialog r={r} />}
+        {real && r.remoteAsk && <RemoteDialog r={r} />}
+        {r.busyMsg && !r.remoteAsk && (
+          <div className="fixed bottom-10 left-1/2 z-50 -translate-x-1/2 border border-teal/40 bg-panel px-4 py-2 text-[12px] text-teal shadow-xl">
+            {r.busyMsg}
+          </div>
+        )}
         {s.phase === "restore" && s.restoreStep === "confirm" && <ConfirmRestoreModal s={s} />}
         {s.phase === "done" && <DoneModal s={s} />}
       </div>

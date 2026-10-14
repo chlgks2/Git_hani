@@ -20,6 +20,8 @@ pub struct FileChange {
     pub staged: bool,
     /// 이름이 바뀐(R) 파일의 원래 이름. 커밋할 때 원래 이름의 삭제도 함께 넣어야 한다.
     pub orig_path: Option<String>,
+    /// 지금 파일 크기(바이트). 지워진 파일은 0 — 큰 파일 경고에 쓴다
+    pub size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,7 +51,7 @@ pub struct RepoStatus {
 ///
 /// 제네릭(<I, S>) : args 로 `["status"]` 같은 &str 배열도, Vec<String> 도 받을 수 있게 한다.
 /// "OS 에 문자열로 넘길 수 있는 것(AsRef<OsStr>)들의 묶음"이면 무엇이든 된다는 뜻.
-fn run_git<I, S>(dir: &Path, args: I) -> Result<String, String>
+pub(crate) fn run_git<I, S>(dir: &Path, args: I) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -58,7 +60,7 @@ where
 }
 
 /// run_git 과 같지만 환경 변수를 더 지정할 수 있다 (예: 로그인 창을 띄우지 않기)
-fn run_git_env<I, S>(dir: &Path, args: I, envs: &[(&str, &str)]) -> Result<String, String>
+pub(crate) fn run_git_env<I, S>(dir: &Path, args: I, envs: &[(&str, &str)]) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -142,7 +144,7 @@ fn parse_branch_line(line: &str, st: &mut RepoStatus) {
 }
 
 /// 저장소의 맨 위 폴더를 찾는다. Git 저장소가 아니면 친절한 메시지로 실패한다.
-fn repo_root(path: &str) -> Result<String, String> {
+pub(crate) fn repo_root(path: &str) -> Result<String, String> {
     run_git(Path::new(path), ["rev-parse", "--show-toplevel"])
         .map(|out| out.trim().to_string())
         .map_err(|_| "이 폴더는 Git 저장소가 아니에요. Git 으로 관리 중인 프로젝트 폴더를 골라 주세요.".to_string())
@@ -196,7 +198,11 @@ pub fn status(path: &str) -> Result<RepoStatus, String> {
             None
         };
         let x = code.chars().next().unwrap_or(' ');
+        let size = std::fs::metadata(root_path.join(&file_path))
+            .map(|m| if m.is_file() { m.len() } else { 0 })
+            .unwrap_or(0);
         st.files.push(FileChange {
+            size,
             path: file_path,
             status: simplify(code).to_string(),
             code: code.to_string(),
@@ -459,7 +465,7 @@ pub fn push(path: &str, up_to: Option<&str>) -> Result<PushResult, String> {
 }
 
 /// push 실패 메시지를 쉬운 말로 바꾼다.
-fn friendly_push_error(e: String) -> String {
+pub(crate) fn friendly_push_error(e: String) -> String {
     let has = |k: &str| e.contains(k);
     let msg = if has("fetch first") || has("non-fast-forward") || (has("[rejected]") && has("behind")) {
         "온라인에 내가 아직 받지 않은 새 저장 지점이 있어서 올릴 수 없어요. 먼저 ‘받아오기’로 최신 내용을 받아와야 해요."
@@ -718,7 +724,7 @@ pub fn parse_conflicts(text: &str) -> Option<Vec<Segment>> {
 }
 
 /// 저장소 안의 상대 경로인지 확인 (.. 이나 절대 경로로 저장소 밖 파일을 건드리지 못하게)
-fn safe_rel_path(file: &str) -> Result<&str, String> {
+pub(crate) fn safe_rel_path(file: &str) -> Result<&str, String> {
     let p = Path::new(file);
     if file.is_empty() || p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return Err("잘못된 파일 경로예요.".into());

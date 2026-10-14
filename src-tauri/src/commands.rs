@@ -4,7 +4,7 @@
 // Tauri 에서 async 가 아닌 명령은 화면을 그리는 메인 스레드에서 실행되기 때문에,
 // push 처럼 몇 초 걸리는 작업을 그대로 부르면 그동안 창이 멈춰 버린다.
 
-use crate::git;
+use crate::{git, setup};
 
 /// 오래 걸릴 수 있는 일을 별도 스레드에서 실행하고 결과를 기다린다.
 /// F: 한 번 실행하고 끝나는 함수(FnOnce), Send + 'static: 다른 스레드로 넘길 수 있는 것
@@ -121,4 +121,42 @@ pub async fn git_restore_to(path: String, target: String) -> Result<git::Restore
 #[tauri::command]
 pub async fn git_file_diff(path: String, file: String) -> Result<git::FileDiff, String> {
     blocking(move || git::file_diff(&path, &file)).await
+}
+
+/* ---------- 처음 쓰는 사람용 (setup.rs) ---------- */
+
+#[tauri::command]
+pub async fn git_identity(path: Option<String>) -> Result<setup::Identity, String> {
+    blocking(move || setup::identity(path.as_deref())).await
+}
+
+/// 이름·이메일을 이 컴퓨터 전체(모든 저장소)에 설정한다
+#[tauri::command]
+pub async fn git_set_identity(name: String, email: String) -> Result<(), String> {
+    blocking(move || setup::set_identity(None, &name, &email)).await
+}
+
+#[tauri::command]
+pub async fn git_init(path: String) -> Result<setup::InitResult, String> {
+    blocking(move || setup::init_repo(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_clone(url: String, parent: String) -> Result<String, String> {
+    blocking(move || setup::clone_repo(&url, &parent)).await
+}
+
+#[tauri::command]
+pub async fn git_set_remote(path: String, url: String) -> Result<(), String> {
+    blocking(move || setup::set_remote(&path, &url)).await
+}
+
+#[tauri::command]
+pub async fn git_ignore_suggestions(path: String) -> Result<Vec<setup::IgnoreSuggestion>, String> {
+    blocking(move || setup::ignore_suggestions(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_add_ignore(path: String, patterns: Vec<String>) -> Result<usize, String> {
+    blocking(move || setup::add_to_gitignore(&path, &patterns)).await
 }

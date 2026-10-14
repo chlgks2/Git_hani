@@ -4,10 +4,15 @@ import { ArrowDown, ArrowUp, Check, Cloud, CloudDownload, CloudOff, CloudUpload,
 import {
   gitCommit,
   gitAbortMerge,
+  gitAddIgnore,
+  gitClone,
   gitConflictFile,
   gitFetch,
   gitFinishMerge,
+  gitIdentity,
+  gitIgnoreSuggestions,
   gitIncoming,
+  gitInit,
   gitLog,
   gitPull,
   gitPush,
@@ -15,9 +20,15 @@ import {
   gitResolveWhole,
   gitRestorePreview,
   gitRestoreTo,
+  gitSetIdentity,
+  gitSetRemote,
   gitStartMerge,
   gitStatus,
   gitUnpushed,
+  formatSize,
+  GITHUB_LIMIT,
+  LARGE_WARN,
+  looksHeavy,
   looksSecret,
   isBackupRef,
   isDesktop,
@@ -30,6 +41,8 @@ import {
   type CommitWithFiles,
   type RestorePreview,
   type FileChange,
+  type Identity,
+  type IgnoreSuggestion,
   type RepoStatus,
   type UnpushedCommit,
 } from "../git";
@@ -37,6 +50,7 @@ import type { Block } from "../store";
 import { aiCommitMessage, aiExplainConflict, aiHealth, aiSummarize, collectPatches, type AiState, type Summary } from "../ai";
 import type { ResolverBackend } from "./ConflictResolver";
 import { AI_ENABLED, AI_SOON } from "../features";
+import { addRecent, removeRecent } from "../recent";
 import RealGraph from "./RealGraph";
 import Splitter, { clamp } from "./Splitter";
 import { BlockView } from "./Terminal";
@@ -45,7 +59,13 @@ import { GitChip } from "./Term";
 let seq = 1;
 
 /** 비밀 정보로 보이는 파일이 있어 확인이 필요한 상황 */
-type SecretAsk = { mode: "commit"; files: string[] } | { mode: "push"; files: string[]; upTo?: string };
+/** 커밋 확인 창을 지나 다시 커밋할 때 이어 가는 옵션 */
+type CommitOpts = { force?: boolean; forceLarge?: boolean; exclude?: string[] };
+
+type SecretAsk =
+  | { mode: "commit"; files: string[]; opts: CommitOpts }
+  | { mode: "large"; files: string[]; sizes: number[]; opts: CommitOpts }
+  | { mode: "push"; files: string[]; upTo?: string };
 
 export function useRealRepo() {
   const [repo, setRepo] = useState<RepoStatus | null>(null);
@@ -71,6 +91,12 @@ export function useRealRepo() {
   const [restoring, setRestoring] = useState(false);
   const [undoOf, setUndoOf] = useState<string | null>(null); // "방금 저장한 것 되돌리기"일 때 그 저장 메시지
   const [diffFile, setDiffFile] = useState<string | null>(null); // diff 보기로 연 파일
+  const [identity, setIdentity] = useState<Identity | null>(null); // 저장 지점에 기록될 이름·이메일
+  const [identityAsk, setIdentityAsk] = useState(false); // 이름·이메일 설정 창
+  const [initAsk, setInitAsk] = useState<string | null>(null); // Git 을 시작할지 물어볼 폴더
+  const [remoteAsk, setRemoteAsk] = useState(false); // GitHub 연결 창
+  const [suggestions, setSuggestions] = useState<IgnoreSuggestion[]>([]); // 무시 목록 제안
+  const [busyMsg, setBusyMsg] = useState<string | null>(null); // 오래 걸리는 작업 중 안내 (가져오기 등)
   const [aiState, setAiState] = useState<AiState>("unknown");
   const [summary, setSummary] = useState<Summary | null>(null); // AI 가 설명한 바뀐 내용
   const [summarizing, setSummarizing] = useState(false);
@@ -96,11 +122,12 @@ export function useRealRepo() {
       gitIncoming(path).catch(() => [] as CommitWithFiles[]),
     ]);
     pathRef.current = st.root;
-    // 체크 상태 유지: 이미 있던 파일은 그대로, 새로 나타난 파일은 체크 (비밀 정보로 보이면 체크 안 함)
+    // 체크 상태 유지: 이미 있던 파일은 그대로, 새로 나타난 파일은 체크
+    // (비밀 정보로 보이거나, node_modules 처럼 보통 저장하지 않는 파일은 체크 안 함)
     const next = new Set<string>();
     for (const f of st.files) {
       const isNew = !seen.current.has(f.path);
-      if (isNew ? !looksSecret(f.path) : checkedRef.current.has(f.path)) next.add(f.path);
+      if (isNew ? !looksSecret(f.path) && !looksHeavy(f.path) : checkedRef.current.has(f.path)) next.add(f.path);
     }
     seen.current = new Set(st.files.map((f) => f.path));
     setChecked(next);
@@ -108,6 +135,7 @@ export function useRealRepo() {
     setCommits(list);
     setUnpushed(ahead);
     setIncoming(behind);
+    gitIgnoreSuggestions(st.root).then(setSuggestions).catch(() => setSuggestions([]));
     return st;
   };
 
@@ -116,25 +144,153 @@ export function useRealRepo() {
     try {
       const st = await fetchAll(path);
       addBlock(statusBlock(st, title));
+      addRecent(st.root, st.name);
+      // 첫 커밋에서 막히지 않게, 이름·이메일이 없으면 미리 알려준다
+      gitIdentity(st.root).then(setIdentity).catch(() => setIdentity(null));
+      return true;
     } catch (e) {
-      addBlock({ title, git: "git status", lines: [{ tone: "err", text: String(e) }] });
+      const msg = String(e);
+      if (msg.includes("Git 저장소가 아니에요")) {
+        setInitAsk(path); // 이 폴더에서 Git 을 시작할지 묻는다
+      } else {
+        addBlock({ title, git: "git status", lines: [{ tone: "err", text: msg }] });
+      }
+      return false;
     } finally {
       setLoading(false);
     }
   };
 
-  const open = async () => {
-    const path = await pickFolder();
-    if (!path) return;
+  /** 저장소 하나를 연다 (폴더 고르기·최근 목록·가져오기 결과 모두 여기로) */
+  const openPath = async (path: string) => {
     seen.current = new Set();
     setMessage("");
     setDescription("");
     setConflict(null);
     setLastCheck(null);
     setSummary(null);
-    await load(path, "저장소 열기");
-    void quietCheck();
-    void checkAi();
+    setSelected(null);
+    setLog([]);
+    const ok = await load(path, "저장소 열기");
+    if (ok) {
+      void quietCheck();
+      void checkAi();
+    }
+    return ok;
+  };
+
+  /** 최근 목록에서 열기. 폴더가 사라졌으면 목록에서 지운다 */
+  const openRecent = async (path: string) => {
+    try {
+      await gitStatus(path);
+    } catch (e) {
+      if (!String(e).includes("Git 저장소가 아니에요")) {
+        removeRecent(path);
+        addBlock({ title: "최근 저장소 열기", lines: [{ tone: "err", text: `열 수 없어서 목록에서 지웠어요: ${path}` }] });
+        return false;
+      }
+    }
+    return openPath(path);
+  };
+
+  /** 폴더에서 Git 시작하기 (git init + 기본 .gitignore) */
+  const initRepo = async (path: string) => {
+    setInitAsk(null);
+    try {
+      const res = await gitInit(path);
+      addBlock({
+        title: "Git 시작하기",
+        git: "git init -b main",
+        lines: [
+          { tone: "ok", text: "이 폴더에서 Git 을 시작했어요. 이제 바뀐 내용을 저장 지점으로 남길 수 있어요" },
+          ...(res.gitignoreCreated
+            ? [{ tone: "ok" as const, text: "기본 무시 목록(.gitignore)도 만들었어요 — .env, node_modules 등은 저장되지 않아요" }]
+            : []),
+        ],
+      });
+      await openPath(res.root);
+    } catch (e) {
+      addBlock({ title: "Git 시작하기", git: "git init", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  /** GitHub 등에서 저장소 가져오기 (git clone) — 성공하면 바로 연다 */
+  const cloneRepo = async (url: string, parent: string) => {
+    setBusyMsg("저장소를 가져오는 중이에요… 처음이면 GitHub 로그인 창이 뜰 수 있어요");
+    try {
+      const dest = await gitClone(url, parent);
+      await openPath(dest);
+      addBlock({ title: "가져오기", git: `git clone ${url}`, lines: [{ tone: "ok", text: `가져와서 열었어요: ${dest}` }] });
+      return null;
+    } catch (e) {
+      return String(e); // 가져오기 창에 그대로 보여준다
+    } finally {
+      setBusyMsg(null);
+    }
+  };
+
+  /** 이름·이메일 설정 (이 컴퓨터 전체) */
+  const saveIdentity = async (name: string, email: string) => {
+    await gitSetIdentity(name, email); // 실패하면 설정 창이 에러를 보여준다
+    setIdentityAsk(false);
+    if (pathRef.current) setIdentity(await gitIdentity(pathRef.current));
+    addBlock({ title: "이름·이메일 설정", git: "git config --global user.name / user.email", lines: [{ tone: "ok", text: `${name} <${email}> 로 저장 지점을 남겨요` }] });
+  };
+
+  /** 온라인 저장소에 연결하고, 저장 지점이 있으면 바로 올린다 */
+  const connectRemote = async (url: string) => {
+    if (!repo) return "저장소를 먼저 열어 주세요.";
+    try {
+      await gitSetRemote(repo.root, url);
+      addBlock({ title: "온라인 저장소 연결", git: `git remote add origin ${url}`, lines: [{ tone: "ok", text: `연결했어요: ${url}` }] });
+      setRemoteAsk(false);
+      if (repo.noCommits) {
+        addBlock({ title: "올리기", lines: [{ tone: "plain", text: "아직 저장 지점이 없어요. 먼저 커밋한 뒤 ‘올리기’를 눌러 주세요." }] });
+        await fetchAll(repo.root);
+        return null;
+      }
+      setBusyMsg("GitHub 에 올리는 중이에요… 처음이면 로그인 창이 뜰 수 있어요");
+      try {
+        const res = await gitPush(repo.root);
+        addBlock({
+          title: "처음 올리기",
+          git: `git push -u ${res.remote} ${res.branch}`,
+          lines: [{ tone: "ok", text: `온라인(${res.remote}/${res.branch})에 올리고 연결했어요. 다음부터는 ‘올리기’만 누르면 돼요` }],
+        });
+      } catch (e) {
+        addBlock({ title: "처음 올리기", git: "git push -u", lines: [{ tone: "err", text: String(e) }] });
+      } finally {
+        setBusyMsg(null);
+      }
+      await fetchAll(repo.root);
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  };
+
+  /** 무시 목록(.gitignore)에 추가 → 해당 파일들이 바뀐 목록에서 사라진다 */
+  const addIgnore = async (patterns: string[]) => {
+    if (!repo || !patterns.length) return;
+    try {
+      const n = await gitAddIgnore(repo.root, patterns);
+      addBlock({
+        title: "무시 목록에 추가",
+        git: ".gitignore",
+        lines: [
+          { tone: "ok", text: n ? `${patterns.join(", ")} 를 저장하지 않도록 했어요` : "이미 무시 목록에 있어요" },
+          { tone: "dim", text: "무시 목록(.gitignore) 파일도 바뀌었으니 같이 저장해 두세요" },
+        ],
+      });
+      await fetchAll(repo.root);
+    } catch (e) {
+      addBlock({ title: "무시 목록에 추가", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
+  const open = async () => {
+    const path = await pickFolder();
+    if (path) await openPath(path);
   };
 
   /* ---------- AI ---------- */
@@ -289,6 +445,8 @@ export function useRealRepo() {
     setSelected(null);
     setRestoreAsk(null);
     setDiffFile(null);
+    setSuggestions([]);
+    setIdentity(null);
     setLog([]);
   };
 
@@ -307,15 +465,26 @@ export function useRealRepo() {
    * 체크한 파일을 커밋한다.
    * 비밀 정보로 보이는 파일이 있으면 먼저 확인 창을 띄운다(force 로 넘어가거나, exclude 로 빼고 저장).
    */
-  const commit = async (opts: { force?: boolean; exclude?: string[] } = {}) => {
+  const commit = async (opts: CommitOpts = {}) => {
     if (!repo || committing) return;
     const msg = message.trim();
     const picked = repo.files.filter((f) => checkedRef.current.has(f.path) && !opts.exclude?.includes(f.path));
     if (!msg || !picked.length) return;
+    // 이름·이메일이 없으면 커밋이 실패하므로 먼저 설정 창을 연다
+    if (identity && (!identity.name || !identity.email)) {
+      setIdentityAsk(true);
+      return;
+    }
 
+    // 큰 파일 (50MB 이상 경고, 100MB 넘으면 GitHub 이 받지 않음)
+    const large = picked.filter((f) => f.size >= LARGE_WARN);
+    if (large.length && !opts.forceLarge) {
+      setSecretAsk({ mode: "large", files: large.map((f) => f.path), sizes: large.map((f) => f.size), opts });
+      return;
+    }
     const secrets = picked.map((f) => f.path).filter(looksSecret);
     if (secrets.length && !opts.force) {
-      setSecretAsk({ mode: "commit", files: secrets });
+      setSecretAsk({ mode: "commit", files: secrets, opts });
       return;
     }
     setSecretAsk(null);
@@ -337,7 +506,7 @@ export function useRealRepo() {
           { tone: "ok", text: `저장 지점을 만들었어요 · ${res.short} “${msg}”` },
           ...picked.slice(0, 20).map((f) => ({ tone: "dim" as const, text: `  ${f.status}  ${f.path}` })),
           ...(picked.length > 20 ? [{ tone: "dim" as const, text: `  … 외 ${picked.length - 20}개` }] : []),
-          ...(opts.exclude?.length ? [{ tone: "ok" as const, text: `비밀 정보로 보이는 파일 ${opts.exclude.length}개는 빼고 저장했어요` }] : []),
+          ...(opts.exclude?.length ? [{ tone: "ok" as const, text: `확인이 필요했던 파일 ${opts.exclude.length}개는 빼고 저장했어요` }] : []),
           { tone: "dim", text: "아직 온라인에는 안 올라갔어요. 오른쪽 ‘올리기’를 누르면 올라가요." },
         ],
       });
@@ -347,6 +516,7 @@ export function useRealRepo() {
       await fetchAll(repo.root);
     } catch (e) {
       addBlock({ title: "커밋하기", git: "git commit", lines: [{ tone: "err", text: String(e) }] });
+      if (String(e).includes("이름과 이메일")) setIdentityAsk(true);
     } finally {
       setCommitting(false);
     }
@@ -586,6 +756,11 @@ export function useRealRepo() {
     undoOf,
     cancelRestore: () => setRestoreAsk(null),
     diffFile, openDiff: (file: string) => setDiffFile(file), closeDiff: () => setDiffFile(null),
+    identity, identityAsk, openIdentity: () => setIdentityAsk(true), closeIdentity: () => setIdentityAsk(false), saveIdentity,
+    initAsk, initRepo, askInit: (path: string) => setInitAsk(path), cancelInit: () => setInitAsk(null),
+    cloneRepo, openPath, openRecent, busyMsg,
+    remoteAsk, openRemote: () => setRemoteAsk(true), closeRemote: () => setRemoteAsk(false), connectRemote,
+    suggestions, addIgnore,
     aiState, summary, summarizing, suggesting, aiError, explainChanges, suggestMessage, checkAi,
   };
 }
@@ -658,7 +833,7 @@ export function RealExplorer({ r }: { r: RealRepo }) {
           <FolderGit2 size={14} className="text-muted" /> {repo.name}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-2">
-          {repo.files.map((f) => (
+          {repo.files.slice(0, MAX_ROWS).map((f) => (
             <div
               key={f.path}
               onClick={() => r.openDiff(f.path)}
@@ -770,11 +945,26 @@ export function RealInspector({ r }: { r: RealRepo }) {
           )}
           {r.selected && <SelectedCommit r={r} />}
 
+          {r.identity && (!r.identity.name || !r.identity.email) && (
+            <div className="space-y-2 border border-amber/40 bg-amber/5 p-3 text-[12px] leading-relaxed">
+              <div className="font-medium text-amber">저장하려면 이름과 이메일이 필요해요</div>
+              <p className="text-muted">저장 지점마다 누가 저장했는지 기록돼요. 한 번만 설정하면 돼요.</p>
+              <button
+                onClick={r.openIdentity}
+                className="rounded-[3px] bg-amber px-3 py-1.5 text-[12px] font-semibold text-[#2a1a00] hover:brightness-110"
+              >
+                이름·이메일 설정하기
+              </button>
+            </div>
+          )}
+
+          {r.suggestions.length > 0 && <IgnoreHelper r={r} />}
+
           <Sync repo={repo} />
 
           {repo.files.length ? (
             <ul className="border border-line-soft">
-              {repo.files.map((f) => (
+              {repo.files.slice(0, MAX_ROWS).map((f) => (
                 <FileRow
                   key={f.path}
                   f={f}
@@ -944,6 +1134,7 @@ function FileRow({
 }
 
 function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
+  if (ask.mode === "large") return <LargeModal r={r} ask={ask} />;
   const forPush = ask.mode === "push";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
@@ -984,12 +1175,15 @@ function SecretModal({ r, ask }: { r: RealRepo; ask: SecretAsk }) {
         ) : (
           <div className="flex flex-col gap-1 border-t border-line-soft p-4">
             <button
-              onClick={() => r.commit({ exclude: ask.files })}
+              onClick={() => ask.mode === "commit" && r.commit({ ...ask.opts, exclude: [...(ask.opts.exclude ?? []), ...ask.files] })}
               className="rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
             >
               이 파일은 빼고 저장하기 (권장)
             </button>
-            <button onClick={() => r.commit({ force: true })} className="py-1.5 text-[12px] text-dim hover:text-muted">
+            <button
+              onClick={() => ask.mode === "commit" && r.commit({ ...ask.opts, force: true })}
+              className="py-1.5 text-[12px] text-dim hover:text-muted"
+            >
               그래도 포함해서 저장할게요
             </button>
             <button onClick={r.cancelSecret} className="py-1 text-[11px] text-dim hover:text-muted">
@@ -1279,7 +1473,17 @@ function PushPanel({ r }: { r: RealRepo }) {
       </div>
       <div className="space-y-3 p-4">
         {note ? (
-          <Row icon={<CloudOff size={13} className="text-dim" />} text={note} />
+          <>
+            <Row icon={<CloudOff size={13} className="text-dim" />} text={note} />
+            {!repo.remotes.length && (
+              <button
+                onClick={r.openRemote}
+                className="flex w-full items-center justify-center gap-2 rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
+              >
+                <CloudUpload size={15} /> GitHub 에 연결하기
+              </button>
+            )}
+          </>
         ) : n === 0 ? (
           <div className="flex items-center gap-2 text-[12px] text-dim">
             <Cloud size={14} className="text-green" /> 온라인과 같은 상태예요. 올릴 저장 지점이 없어요.
@@ -1383,6 +1587,79 @@ function Row({ icon, text }: { icon: React.ReactNode; text: string }) {
   return (
     <div className="flex items-center gap-2 border border-line-soft px-3 py-2 text-[12px] text-muted">
       {icon} {text}
+    </div>
+  );
+}
+
+/** 바뀐 파일이 아주 많을 때(예: node_modules) 화면이 느려지지 않게 앞부분만 그린다 */
+const MAX_ROWS = 300;
+
+/** node_modules 같은 폴더를 무시 목록에 넣자고 제안한다 */
+function IgnoreHelper({ r }: { r: RealRepo }) {
+  const list = r.suggestions;
+  return (
+    <div className="space-y-2 border border-blue/40 bg-blue/5 p-3 text-[12px] leading-relaxed">
+      <div className="font-medium text-blue">보통 저장하지 않는 파일이 있어요</div>
+      <ul className="space-y-1.5">
+        {list.map((s) => (
+          <li key={s.pattern} className="text-muted">
+            <span className="font-mono text-fg">{s.pattern}</span> · 파일 {s.count.toLocaleString()}개
+            {s.size > 0 && <> ({formatSize(s.size)})</>}
+            <div className="text-[11px] text-dim">{s.reason}</div>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[11px] text-dim">무시 목록(.gitignore)에 넣으면 저장·올리기에서 빠지고, 바뀐 목록도 깔끔해져요.</p>
+      <button
+        onClick={() => r.addIgnore(list.map((s) => s.pattern))}
+        className="rounded-[3px] bg-blue px-3 py-1.5 text-[12px] font-semibold text-[#081a33] hover:brightness-110"
+      >
+        모두 무시 목록에 추가
+      </button>
+    </div>
+  );
+}
+
+function LargeModal({ r, ask }: { r: RealRepo; ask: Extract<SecretAsk, { mode: "large" }> }) {
+  const tooBig = ask.sizes.some((s) => s > GITHUB_LIMIT);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55">
+      <div className="rise w-[480px] border border-line bg-panel shadow-2xl shadow-black/60" style={{ borderTop: "2px solid var(--color-amber)" }}>
+        <div className="p-5">
+          <div className="text-[11px] font-medium tracking-wide text-amber">저장 전 확인</div>
+          <h3 className="mt-2 text-[16px] font-semibold text-fg">아주 큰 파일이 있어요</h3>
+          <ul className="mt-3 space-y-1 border border-line-soft bg-base px-3 py-2 font-mono text-[12px]">
+            {ask.files.map((f, i) => (
+              <li key={f} className="flex gap-3">
+                <span className="min-w-0 flex-1 truncate text-fg">{f}</span>
+                <span className={ask.sizes[i] > GITHUB_LIMIT ? "text-red" : "text-amber"}>{formatSize(ask.sizes[i])}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[12px] leading-relaxed text-amber/90">
+            {tooBig
+              ? "GitHub 은 100MB 가 넘는 파일을 받지 않아요. 저장하면 나중에 올리기가 실패하고, 기록에서 빼기도 어려워요."
+              : "큰 파일은 저장소를 무겁게 만들어서 받기·올리기가 느려져요. 영상·압축 파일 같은 건 보통 저장하지 않아요."}
+          </p>
+        </div>
+        <div className="flex flex-col gap-1 border-t border-line-soft p-4">
+          <button
+            onClick={() => r.commit({ ...ask.opts, forceLarge: true, exclude: [...(ask.opts.exclude ?? []), ...ask.files] })}
+            className="rounded-[3px] bg-teal px-3 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110"
+          >
+            이 파일은 빼고 저장하기 (권장)
+          </button>
+          <button
+            onClick={() => r.addIgnore(ask.files).then(r.cancelSecret)}
+            className="py-1.5 text-[12px] text-dim hover:text-muted"
+          >
+            앞으로도 저장하지 않도록 무시 목록에 추가
+          </button>
+          <button onClick={() => r.commit({ ...ask.opts, forceLarge: true })} className="py-1 text-[11px] text-dim hover:text-muted">
+            그래도 포함해서 저장할게요
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

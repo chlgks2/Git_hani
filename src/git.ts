@@ -1,6 +1,7 @@
 // Rust(Tauri) 쪽 Git 명령을 부르는 함수들. 브라우저에서 열면 데모 모드로만 동작한다.
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export interface FileChange {
   path: string;
@@ -9,6 +10,8 @@ export interface FileChange {
   staged: boolean;
   /** 이름이 바뀐 파일의 원래 이름 */
   origPath: string | null;
+  /** 지금 파일 크기(바이트). 지워진 파일은 0 */
+  size: number;
 }
 
 export interface CommitInfo {
@@ -94,6 +97,56 @@ export interface PullResult {
 
 export function gitPull(path: string) {
   return invoke<PullResult>("git_pull", { path });
+}
+
+/* ---------- 처음 쓰는 사람용 ---------- */
+
+export interface Identity {
+  name: string | null;
+  email: string | null;
+}
+/** 저장 지점에 기록될 이름·이메일. path 를 주면 그 저장소 기준 */
+export const gitIdentity = (path?: string) => invoke<Identity>("git_identity", { path: path ?? null });
+/** 이 컴퓨터 전체(모든 저장소)에 이름·이메일 설정 */
+export const gitSetIdentity = (name: string, email: string) => invoke<void>("git_set_identity", { name, email });
+export const gitInit = (path: string) => invoke<{ root: string; gitignoreCreated: boolean }>("git_init", { path });
+/** parent 폴더 안에 저장소를 받아오고, 받은 폴더 경로를 돌려준다 */
+export const gitClone = (url: string, parent: string) => invoke<string>("git_clone", { url, parent });
+export const gitSetRemote = (path: string, url: string) => invoke<void>("git_set_remote", { path, url });
+
+export interface IgnoreSuggestion {
+  pattern: string;
+  reason: string;
+  count: number;
+  size: number;
+}
+export const gitIgnoreSuggestions = (path: string) => invoke<IgnoreSuggestion[]>("git_ignore_suggestions", { path });
+export const gitAddIgnore = (path: string, patterns: string[]) => invoke<number>("git_add_ignore", { path, patterns });
+
+/** 기본 브라우저로 링크 열기 */
+export const openLink = (url: string) => openUrl(url);
+
+/** 보통 저장하지 않는 파일인지 (설치한 라이브러리, 빌드 결과물, 로그 등) — 새 파일이면 기본으로 체크하지 않는다 */
+export function looksHeavy(path: string) {
+  const parts = path.toLowerCase().split("/");
+  const name = parts[parts.length - 1];
+  return (
+    parts.slice(0, -1).some((d) => ["node_modules", ".venv", "venv", "__pycache__", ".next", "dist", "build"].includes(d)) ||
+    name === ".ds_store" ||
+    name === "thumbs.db" ||
+    name.endsWith(".log")
+  );
+}
+
+/** GitHub 이 받아 주지 않는 크기 (100MB) / 경고할 크기 (50MB) */
+export const GITHUB_LIMIT = 100 * 1024 * 1024;
+export const LARGE_WARN = 50 * 1024 * 1024;
+
+export function formatSize(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
 }
 
 /* ---------- 충돌 해결 ---------- */

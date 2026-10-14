@@ -37,11 +37,16 @@ pub struct Snapshot {
     pub skipped_large: Vec<String>,
 }
 
-fn now_secs() -> u64 {
+fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// 스냅샷 이름 "0001791322403123-abc1234" 에서 찍은 시각(초)을 읽는다
+fn time_of(id: &str) -> i64 {
+    id.split('-').next().and_then(|ms| ms.parse::<i64>().ok()).map(|ms| ms / 1000).unwrap_or(0)
 }
 
 /// 지금 폴더 상태를 스냅샷으로 찍는다.
@@ -90,7 +95,7 @@ pub fn create(path: &str, kind: &str) -> Result<Option<Snapshot>, String> {
         root_path,
         [
             "for-each-ref",
-            "--sort=-creatordate",
+            "--sort=-refname",
             "--count=1",
             "--format=%(objectname) %(tree) %(parent)",
             SNAP_PREFIX,
@@ -107,8 +112,9 @@ pub fn create(path: &str, kind: &str) -> Result<Option<Snapshot>, String> {
     let hash = run_git(root_path, ["commit-tree", tree.as_str(), "-p", head.as_str(), "-m", msg.as_str()])?
         .trim()
         .to_string();
-    // 이름: 시각-해시 앞부분 (같은 초에 찍어도 겹치지 않게)
-    let id = format!("{}-{}", now_secs(), &hash[..7]);
+    // 이름: 밀리초 시각(자릿수 고정)-해시 앞부분.
+    // 이름 순서 = 찍은 순서가 되도록 한다. 초 단위로 정렬하면 같은 1초 안에 찍은 스냅샷의 순서가 뒤섞인다.
+    let id = format!("{:016}-{}", now_millis(), &hash[..7]);
     run_git(root_path, ["update-ref", format!("{SNAP_PREFIX}{id}").as_str(), hash.as_str()])?;
 
     // 바뀐 파일: 직전 스냅샷이 같은 저장 지점 위에서 찍혔으면 그것과, 아니면 마지막 저장 지점과 비교
@@ -121,8 +127,8 @@ pub fn create(path: &str, kind: &str) -> Result<Option<Snapshot>, String> {
         .map(String::from)
         .collect();
     Ok(Some(Snapshot {
+        time: time_of(&id),
         id,
-        time: now_secs() as i64,
         kind: kind.into(),
         head_subject: run_git(root_path, ["log", "-1", "--format=%s", "HEAD"])?.trim().to_string(),
         head,
@@ -142,8 +148,8 @@ pub fn list(path: &str) -> Result<Vec<Snapshot>, String> {
         root_path,
         [
             "for-each-ref",
-            "--sort=-creatordate",
-            "--format=%(refname)%1f%(objectname)%1f%(creatordate:unix)%1f%(subject)%1f%(parent)",
+            "--sort=-refname", // 이름이 곧 찍은 순서 (최신이 앞)
+            "--format=%(refname)%1f%(objectname)%1f%(subject)%1f%(parent)",
             SNAP_PREFIX,
         ],
     )?;
@@ -151,15 +157,16 @@ pub fn list(path: &str) -> Result<Vec<Snapshot>, String> {
         .lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\x1f').collect();
-            if f.len() < 5 {
+            if f.len() < 4 {
                 return None;
             }
+            let id = f[0].trim_start_matches(SNAP_PREFIX).to_string();
             Some(Snapshot {
-                id: f[0].trim_start_matches(SNAP_PREFIX).to_string(),
+                time: time_of(&id),
+                id,
                 hash: f[1].to_string(),
-                time: f[2].parse().unwrap_or(0),
-                kind: if f[3].starts_with("auto") { "auto" } else { "manual" }.into(),
-                head: f[4].split_whitespace().next().unwrap_or("").to_string(),
+                kind: if f[2].starts_with("auto") { "auto" } else { "manual" }.into(),
+                head: f[3].split_whitespace().next().unwrap_or("").to_string(),
                 head_subject: String::new(),
                 files: Vec::new(),
                 file_count: 0,
@@ -167,9 +174,6 @@ pub fn list(path: &str) -> Result<Vec<Snapshot>, String> {
             })
         })
         .collect();
-
-    // 같은 초에 찍은 것도 순서가 맞게: 시각, 그다음 이름(시각-해시) 순
-    snaps.sort_by(|a, b| b.time.cmp(&a.time).then(b.id.cmp(&a.id)));
 
     for i in 0..snaps.len() {
         // 비교 기준: 바로 앞(더 오래된) 스냅샷이 같은 저장 지점 위에서 찍혔으면 그것, 아니면 그때의 저장 지점
@@ -271,6 +275,24 @@ mod tests {
         assert!(delete(&p, &["../heads/main".into()]).is_err()); // 다른 ref 는 못 지움
         assert_eq!(delete(&p, &[]).unwrap(), 1); // 전부 지우기
         assert!(list(&p).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn quick_snapshots_keep_their_order() {
+        // 같은 1초 안에 여러 번 찍어도 찍은 순서대로 나와야 한다 (자동 스냅샷에서 생길 수 있는 상황)
+        let dir = temp_repo("order");
+        let p = dir.to_string_lossy().into_owned();
+        write(&dir, "a.txt", "0");
+        commit(&p, &["a.txt".into()], "처음", None).unwrap();
+        let mut made = Vec::new();
+        for i in 1..=5 {
+            write(&dir, "a.txt", &i.to_string());
+            made.push(create(&p, "auto").unwrap().unwrap().hash);
+        }
+        let listed: Vec<String> = list(&p).unwrap().into_iter().map(|s| s.hash).collect();
+        made.reverse(); // 목록은 최신이 앞
+        assert_eq!(listed, made);
         std::fs::remove_dir_all(dir).ok();
     }
 

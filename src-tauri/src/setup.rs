@@ -276,12 +276,12 @@ mod tests {
         let p = dir.to_string_lossy().into_owned();
         init_repo(&p).unwrap();
         // 저장소에만 적용 (테스트가 이 컴퓨터 전체 설정을 바꾸면 안 된다)
-        set_identity(Some(&p), "최한", "me@example.com").unwrap();
+        set_identity(Some(&p), "테스터", "me@example.com").unwrap();
         let id = identity(Some(&p)).unwrap();
-        assert_eq!(id, Identity { name: Some("최한".into()), email: Some("me@example.com".into()) });
+        assert_eq!(id, Identity { name: Some("테스터".into()), email: Some("me@example.com".into()) });
         assert!(set_identity(Some(&p), " ", "me@example.com").is_err());
-        assert!(set_identity(Some(&p), "최한", "이메일아님").is_err());
-        assert!(set_identity(Some(&p), "최한", "a@b").is_err());
+        assert!(set_identity(Some(&p), "테스터", "이메일아님").is_err());
+        assert!(set_identity(Some(&p), "테스터", "a@b").is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -53,7 +53,7 @@ export function StartScreen({ r, onDemo }: { r: RealRepo; onDemo: () => void }) 
     <div className="absolute inset-0 z-30 flex items-center justify-center overflow-y-auto bg-base p-8">
       <div className="w-full max-w-[720px]">
         <div className="mb-8">
-          <div className="font-mono text-[12px] text-dim">Git GUI _ by 최한</div>
+          <div className="font-mono text-[12px] text-dim">Git GUI</div>
           <h1 className="mt-2 text-[24px] font-semibold text-fg">무엇을 할까요?</h1>
           <p className="mt-1 text-[13px] text-muted">Git 을 몰라도 저장하고, 올리고, 되돌릴 수 있게 도와드려요.</p>
         </div>
@@ -250,7 +250,7 @@ export function IdentityDialog({ r }: { r: RealRepo }) {
       <div className="space-y-3 p-5">
         <label className="block">
           <span className="mb-1.5 block text-[12px] text-muted">이름</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 최한" className={input} autoFocus />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 홍길동" className={input} autoFocus />
         </label>
         <label className="block">
           <span className="mb-1.5 block text-[12px] text-muted">이메일</span>

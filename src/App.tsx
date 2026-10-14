@@ -40,13 +40,13 @@ export default function App() {
       <p className="max-w-xs text-[13px] leading-relaxed text-muted">
         Git GUI 프로토타입은 데스크톱 앱 화면이라 가로 폭이 넓은 화면(약 1100px 이상)에서 제대로 보여요.
       </p>
-      <div className="font-mono text-[11px] text-dim">Git GUI _ by 최한</div>
+      <div className="font-mono text-[11px] text-dim">Git GUI</div>
     </div>
     <div className="app flex h-full flex-col">
       {/* 상단 띠 */}
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line bg-base px-4 text-[12px]">
         <span className="font-mono text-[12px] text-muted">
-          Git GUI <span className="text-dim">_</span> by <span className="text-fg">최한</span>
+          Git GUI
         </span>
         {real ? (
           <>

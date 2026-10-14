@@ -4,7 +4,7 @@
 // Tauri 에서 async 가 아닌 명령은 화면을 그리는 메인 스레드에서 실행되기 때문에,
 // push 처럼 몇 초 걸리는 작업을 그대로 부르면 그동안 창이 멈춰 버린다.
 
-use crate::{git, setup};
+use crate::{git, setup, snapshot};
 
 /// 오래 걸릴 수 있는 일을 별도 스레드에서 실행하고 결과를 기다린다.
 /// F: 한 번 실행하고 끝나는 함수(FnOnce), Send + 'static: 다른 스레드로 넘길 수 있는 것
@@ -159,4 +159,22 @@ pub async fn git_ignore_suggestions(path: String) -> Result<Vec<setup::IgnoreSug
 #[tauri::command]
 pub async fn git_add_ignore(path: String, patterns: Vec<String>) -> Result<usize, String> {
     blocking(move || setup::add_to_gitignore(&path, &patterns)).await
+}
+
+/* ---------- 스냅샷 (snapshot.rs) ---------- */
+
+#[tauri::command]
+pub async fn snapshot_create(path: String, kind: String) -> Result<Option<snapshot::Snapshot>, String> {
+    blocking(move || snapshot::create(&path, &kind)).await
+}
+
+#[tauri::command]
+pub async fn snapshot_list(path: String) -> Result<Vec<snapshot::Snapshot>, String> {
+    blocking(move || snapshot::list(&path)).await
+}
+
+/// ids 가 비어 있으면 전부 지운다
+#[tauri::command]
+pub async fn snapshot_delete(path: String, ids: Vec<String>) -> Result<usize, String> {
+    blocking(move || snapshot::delete(&path, &ids)).await
 }

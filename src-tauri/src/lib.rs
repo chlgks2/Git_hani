@@ -1,6 +1,7 @@
 mod commands;
 mod git;
 mod setup;
+mod snapshot;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -37,6 +38,9 @@ pub fn run() {
       commands::git_set_remote,
       commands::git_ignore_suggestions,
       commands::git_add_ignore,
+      commands::snapshot_create,
+      commands::snapshot_list,
+      commands::snapshot_delete,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

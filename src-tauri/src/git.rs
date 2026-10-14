@@ -599,7 +599,7 @@ fn friendly_pull_error(e: String) -> String {
 
 /* ---------- 충돌 해결 ---------- */
 
-fn is_merging(root_path: &Path) -> bool {
+pub(crate) fn is_merging(root_path: &Path) -> bool {
     run_git(root_path, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
 }
 
@@ -937,8 +937,11 @@ pub fn restore_to(path: &str, target: &str) -> Result<RestoreResult, String> {
     }
     let hash = resolve_target(root_path, target)?;
     let changed = restore_preview(&root, &hash)?.changes.len();
-    // 되돌리기 전 백업을 되살리는 것인지 — 원래 저장 안 한 작업이었으니 저장 안 한 상태로 돌려놓는다
-    let from_backup = !run_git(root_path, ["for-each-ref", "--points-at", hash.as_str(), "refs/heads/backup/"])?
+    // 되돌리기 전 백업이나 스냅샷을 되살리는 것인지 — 원래 저장 안 한 작업이었으니 저장 안 한 상태로 돌려놓는다
+    let from_backup = !run_git(
+        root_path,
+        ["for-each-ref", "--points-at", hash.as_str(), "refs/heads/backup/", "refs/gitgui/snapshots/"],
+    )?
         .trim()
         .is_empty();
 

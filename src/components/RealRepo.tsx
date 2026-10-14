@@ -25,6 +25,10 @@ import {
   gitStartMerge,
   gitStatus,
   gitUnpushed,
+  snapshotCreate,
+  snapshotDelete,
+  snapshotList,
+  clockTime,
   formatSize,
   GITHUB_LIMIT,
   LARGE_WARN,
@@ -40,6 +44,7 @@ import {
   type CommitInfo,
   type CommitWithFiles,
   type RestorePreview,
+  type Snapshot,
   type FileChange,
   type Identity,
   type IgnoreSuggestion,
@@ -52,6 +57,7 @@ import type { ResolverBackend } from "./ConflictResolver";
 import { AI_ENABLED, AI_SOON } from "../features";
 import { addRecent, removeRecent } from "../recent";
 import RealGraph from "./RealGraph";
+import Timeline from "./Timeline";
 import Splitter, { clamp } from "./Splitter";
 import { BlockView } from "./Terminal";
 import { GitChip } from "./Term";
@@ -90,6 +96,10 @@ export function useRealRepo() {
   const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null); // 되돌리기 확인 창
   const [restoring, setRestoring] = useState(false);
   const [undoOf, setUndoOf] = useState<string | null>(null); // "방금 저장한 것 되돌리기"일 때 그 저장 메시지
+  const [snapAt, setSnapAt] = useState<number | null>(null); // 스냅샷으로 돌아가기일 때 그 시각
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapBusy, setSnapBusy] = useState(false);
+  const [centerTab, setCenterTab] = useState<"history" | "timeline">("history");
   const [diffFile, setDiffFile] = useState<string | null>(null); // diff 보기로 연 파일
   const [identity, setIdentity] = useState<Identity | null>(null); // 저장 지점에 기록될 이름·이메일
   const [identityAsk, setIdentityAsk] = useState(false); // 이름·이메일 설정 창
@@ -660,13 +670,65 @@ export function useRealRepo() {
 
   /* ---------- 되돌리기 ---------- */
 
+  /* ---------- 스냅샷 (시간 기록) ---------- */
+
+  const loadSnapshots = async () => {
+    if (!pathRef.current) return;
+    setSnapshots(await snapshotList(pathRef.current).catch(() => [] as Snapshot[]));
+  };
+
+  /** 지금 상태를 스냅샷으로 찍는다 */
+  const takeSnapshot = async () => {
+    if (!repo || snapBusy) return;
+    setSnapBusy(true);
+    try {
+      const snap = await snapshotCreate(repo.root, "manual");
+      addBlock(
+        snap
+          ? {
+              title: "스냅샷 찍기",
+              git: "refs/gitgui/snapshots",
+              lines: [
+                { tone: "ok", text: `${clockTime(snap.time)} 상태를 찍어 뒀어요 · 파일 ${snap.fileCount}개 바뀐 상태` },
+                ...(snap.skippedLarge.length
+                  ? [{ tone: "warn" as const, text: `너무 큰 파일은 빼고 찍었어요: ${snap.skippedLarge.join(", ")}` }]
+                  : []),
+                { tone: "dim", text: "시간 기록에서 언제든 이 상태로 돌아올 수 있어요" },
+              ],
+            }
+          : {
+              title: "스냅샷 찍기",
+              lines: [{ tone: "dim", text: "바뀐 게 없어서 찍지 않았어요. (마지막 저장 상태나 직전 스냅샷과 같아요)" }],
+            },
+      );
+      await loadSnapshots();
+    } catch (e) {
+      addBlock({ title: "스냅샷 찍기", lines: [{ tone: "err", text: String(e) }] });
+    } finally {
+      setSnapBusy(false);
+    }
+  };
+
+  /** 스냅샷 지우기 (ids 가 비면 전부) */
+  const deleteSnapshots = async (ids: string[]) => {
+    if (!repo) return;
+    try {
+      const n = await snapshotDelete(repo.root, ids);
+      addBlock({ title: "스냅샷 지우기", lines: [{ tone: "ok", text: `스냅샷 ${n}개를 지웠어요` }] });
+      await loadSnapshots();
+    } catch (e) {
+      addBlock({ title: "스냅샷 지우기", lines: [{ tone: "err", text: String(e) }] });
+    }
+  };
+
   /** 지금 마지막 저장 지점 */
   const headHash = commits.find((c) => c.refs.some((ref) => ref === "HEAD" || ref.startsWith("HEAD -> ")))?.hash ?? null;
 
   /** 되돌리기 확인 창 열기: 무엇이 바뀌는지 먼저 계산해서 보여준다 */
-  const askRestore = async (target: string, undoSubject: string | null = null) => {
+  const askRestore = async (target: string, undoSubject: string | null = null, snapshotTime: number | null = null) => {
     if (!repo) return;
     setUndoOf(undoSubject);
+    setSnapAt(snapshotTime);
     try {
       setRestoreAsk(await gitRestorePreview(repo.root, target));
     } catch (e) {
@@ -705,7 +767,15 @@ export function useRealRepo() {
       if (res.commit) lines.push({ tone: "dim", text: `되돌린 상태를 새 저장 지점으로 기록했어요 · ${res.commit.short} (기록은 지워지지 않아요)` });
       if (res.backup) lines.push({ tone: "dim", text: "그래프의 ‘되돌리기 전 백업’을 고르면 언제든 다시 되살릴 수 있어요" });
       addBlock({
-        title: res.uncommitted ? "백업 되살리기" : restoreAsk.isHead ? "변경 모두 취소" : undoOf ? `“${undoOf}” 되돌리기` : "되돌리기",
+        title: snapAt
+          ? `${clockTime(snapAt)} 스냅샷으로 돌아가기`
+          : res.uncommitted
+            ? "백업 되살리기"
+            : restoreAsk.isHead
+              ? "변경 모두 취소"
+              : undoOf
+                ? `“${undoOf}” 되돌리기`
+                : "되돌리기",
         git: `git restore --source=${t.short} .${res.commit ? " && git commit" : ""}`,
         lines,
       });
@@ -713,6 +783,7 @@ export function useRealRepo() {
       setSelected(null);
       setSummary(null);
       await reload();
+      if (snapAt) await loadSnapshots();
     } catch (e) {
       addBlock({ title: "되돌리기", git: "git restore", lines: [{ tone: "err", text: String(e) }] });
     } finally {
@@ -753,7 +824,8 @@ export function useRealRepo() {
     dismissConflict: () => setConflict(null),
     resolving, mergeFiles, reload, openResolver, closeResolver: () => setResolving(false), noteResolved, finishMerge, abortMerge,
     selected, setSelected, headHash, restoreAsk, restoring, askRestore, restoreShortcut, doRestore,
-    undoOf,
+    undoOf, snapAt,
+    snapshots, snapBusy, loadSnapshots, takeSnapshot, deleteSnapshots, centerTab, setCenterTab,
     cancelRestore: () => setRestoreAsk(null),
     diffFile, openDiff: (file: string) => setDiffFile(file), closeDiff: () => setDiffFile(null),
     identity, identityAsk, openIdentity: () => setIdentityAsk(true), closeIdentity: () => setIdentityAsk(false), saveIdentity,
@@ -864,6 +936,25 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
 
   return (
     <>
+      <div className="flex h-8 shrink-0 items-stretch border-b border-line bg-panel text-[12px]">
+        {(
+          [
+            ["history", "저장 기록"],
+            ["timeline", `시간 기록${r.snapshots.length ? ` (${r.snapshots.length})` : ""}`],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => r.setCenterTab(key)}
+            className={`border-r border-line-soft px-4 ${r.centerTab === key ? "bg-base text-fg" : "text-dim hover:text-muted"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {r.centerTab === "timeline" ? (
+        <Timeline r={r} />
+      ) : (
       <RealGraph
         root={repo.root}
         commits={r.commits}
@@ -873,6 +964,7 @@ export function RealMain({ r, termH, splitter }: { r: RealRepo; termH: number; s
         selected={r.selected}
         onSelect={r.setSelected}
       />
+      )}
       {splitter}
       <section className="flex shrink-0 flex-col bg-panel" style={{ height: termH }}>
         <div className="flex h-8 shrink-0 items-center border-b border-line-soft px-3 text-[12px] text-fg">
@@ -1259,8 +1351,12 @@ const KIND_LABEL: Record<string, { text: string; tone: string }> = {
 
 function RestoreModal({ r, pv }: { r: RealRepo; pv: RestorePreview }) {
   const t = pv.target;
-  const backup = t.refs.some((ref) => isBackupRef(ref.replace(/^refs\/heads\//, "")));
-  const title = pv.isHead
+  const snap = r.snapAt;
+  // 스냅샷도 백업처럼 "저장 안 한 변경"으로 되살아난다
+  const backup = snap != null || t.refs.some((ref) => isBackupRef(ref.replace(/^refs\/heads\//, "")));
+  const title = snap
+    ? `${clockTime(snap)} 스냅샷으로 돌아갈까요?`
+    : pv.isHead
     ? "저장 안 한 변경을 모두 취소할까요?"
     : backup
       ? "되돌리기 전 백업을 되살릴까요?"
@@ -1336,7 +1432,7 @@ function RestoreModal({ r, pv }: { r: RealRepo; pv: RestorePreview }) {
             className="flex items-center gap-1.5 rounded-[3px] bg-teal px-4 py-2 text-[13px] font-semibold text-[#0b2626] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
           >
             {r.restoring ? <Spin dark /> : <RotateCcw size={14} />}
-            {pv.isHead ? "변경 취소" : backup ? "되살리기" : "되돌리기"}
+            {snap ? "이 때로 돌아가기" : pv.isHead ? "변경 취소" : backup ? "되살리기" : "되돌리기"}
           </button>
         </div>
       </div>

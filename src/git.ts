@@ -149,6 +149,41 @@ export function formatSize(bytes: number) {
   return `${bytes}B`;
 }
 
+/* ---------- 스냅샷 (시간 기록) ---------- */
+
+export interface Snapshot {
+  id: string;
+  hash: string;
+  /** 찍은 시각 (초) */
+  time: number;
+  kind: "manual" | "auto";
+  /** 찍을 때의 마지막 저장 지점 */
+  head: string;
+  headSubject: string;
+  /** 바로 앞 스냅샷(또는 그때의 저장 지점) 이후 바뀐 파일 (최대 20개) */
+  files: string[];
+  fileCount: number;
+  /** 너무 커서 빼고 찍은 파일 */
+  skippedLarge: string[];
+}
+/** 지금 상태를 스냅샷으로 찍는다. 바뀐 게 없으면 null */
+export const snapshotCreate = (path: string, kind: "manual" | "auto" = "manual") =>
+  invoke<Snapshot | null>("snapshot_create", { path, kind });
+export const snapshotList = (path: string) => invoke<Snapshot[]>("snapshot_list", { path });
+/** ids 가 비어 있으면 전부 지운다 */
+export const snapshotDelete = (path: string, ids: string[]) => invoke<number>("snapshot_delete", { path, ids });
+
+/** 초 단위 시각을 "오늘 오후 2:10" / "10월 14일 오전 9:05" 로 */
+export function clockTime(sec: number) {
+  const d = new Date(sec * 1000);
+  const now = new Date();
+  const h = d.getHours();
+  const hm = `${h < 12 ? "오전" : "오후"} ${h % 12 === 0 ? 12 : h % 12}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now.getTime() - 86400_000).toDateString() === d.toDateString();
+  return `${sameDay ? "오늘" : yesterday ? "어제" : `${d.getMonth() + 1}월 ${d.getDate()}일`} ${hm}`;
+}
+
 /* ---------- 충돌 해결 ---------- */
 
 export type Segment =
